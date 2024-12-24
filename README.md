@@ -22,6 +22,10 @@ $ julia --project scripts/solve.jl \
 --tolerance=TOLERANCE --time_sec_limit=TIME_SEC_LIMIT
 ```
 
+```shell
+julia --project scripts/solve.jl --instance_name=adlittle --dataset=netlib --output_directory=output --tolerance=1e-4 --time_sec_limit=60
+```
+
 ## Interpreting the output
 
 A table of iteration stats will be printed with the following headings.

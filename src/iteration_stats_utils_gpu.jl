@@ -386,7 +386,7 @@ function compute_iteration_stats(
     cumulative_time_sec::Float64,
     eps_optimal_absolute::Float64,
     eps_optimal_relative::Float64,
-    step_size::Float64,
+    step_size::Union{Float64,CuVector{Float64}},
     primal_weight::Float64,
     candidate_type::PointType,
     primal_product::CuVector{Float64},

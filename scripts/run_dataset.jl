@@ -1,9 +1,9 @@
 import ArgParse
 import GZip
 import JSON3
-import JSON
 
 import cuPDLP
+include("json2csv.jl")
 
 function write_vector_to_file(filename, vector)
     open(filename, "w") do io
@@ -123,45 +123,6 @@ function warm_up(lp::cuPDLP.QuadraticProgrammingProblem)
     cuPDLP.optimize(params_warmup, lp);
 end
 
-
-function parse_command_line()
-    arg_parse = ArgParse.ArgParseSettings()
-
-    ArgParse.@add_arg_table! arg_parse begin
-        "--instance_name"
-        help = "The name of the instance to solve in .mps.gz or .mps format."
-        arg_type = String
-        required = true
-
-        "--dataset"
-        help = "dataset name"
-        arg_type = String
-        required = true
-
-        "--experiment_name"
-        help = "experiment name."
-        arg_type = String
-        required = true
-
-        "--tolerance"
-        help = "KKT tolerance of the solution."
-        arg_type = Float64
-        default = 1e-4
-
-        "--time_sec_limit"
-        help = "Time limit."
-        arg_type = Float64
-        default = 3600.0
-
-        "--learning_rate"
-        help = "Learning rate for online scaling."
-        arg_type = Float64
-        default = 0.0
-    end
-
-    return ArgParse.parse_args(arg_parse)
-end
-
 function get_iteration_from_json(json_file)
     if isfile(json_file)
         json_string = read(json_file, String)
@@ -189,13 +150,48 @@ function get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
     return max(ada_iter, basic_iter) * 5
 end
 
+function parse_command_line()
+    arg_parse = ArgParse.ArgParseSettings()
+
+    ArgParse.@add_arg_table! arg_parse begin
+
+        "--dataset"
+        help = "dataset name"
+        arg_type = String
+        required = true
+
+        "--experiment_name"
+        help = "experiment name."
+        arg_type = String
+        required = true
+
+        "--tolerance"
+        help = "KKT tolerance of the solution."
+        arg_type = Float64
+        default = 1e-4
+
+        "--time_sec_limit"
+        help = "Time limit."
+        arg_type = Float64
+        default = 3600.0
+
+        "--learning_rate"
+        help = "Learning rate for online scaling."
+        arg_type = Float64
+        default = 0.0
+
+    end
+
+    return ArgParse.parse_args(arg_parse)
+end
+
+
 function main()
     parsed_args = parse_command_line()
-    instance_name = parsed_args["instance_name"]
     dataset = parsed_args["dataset"]
-    experiment_name = parsed_args["experiment_name"]
     tolerance = parsed_args["tolerance"]
     time_sec_limit = parsed_args["time_sec_limit"]
+    experiment_name = parsed_args["experiment_name"]
     learning_rate = parsed_args["learning_rate"]
 
     if experiment_name == "adaPDLP"
@@ -208,7 +204,8 @@ function main()
         adaptive_step_size = false
         adaptive_primal_weight = false
         online_scaling = true
-        iteration_limit = get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
+        iteration_limit = typemax(Int32)
+        
     elseif experiment_name == "basicPDLP"
         adaptive_step_size = false
         adaptive_primal_weight = false
@@ -220,71 +217,91 @@ function main()
     end
 
     experiment_name = "$(experiment_name)_time_$(time_sec_limit)_tol_$(tolerance)_lr_$(learning_rate)"
-
-    instance_path = joinpath("data", dataset, "$(instance_name).mps.gz")
-
-    output_directory = joinpath("output/solver_output", dataset, experiment_name,instance_name)
-    if !isdir(output_directory)
-        mkpath(output_directory)
-    end
-
-    lp = cuPDLP.qps_reader_to_standard_form(instance_path)
-
-    oldstd = stdout
-    redirect_stdout(devnull) # suppress output
-    warm_up(lp); # solve the LP for 100 iterations
-    redirect_stdout(oldstd)
-
-    restart_params = cuPDLP.construct_restart_parameters(
-        cuPDLP.ADAPTIVE_KKT,    # NO_RESTARTS FIXED_FREQUENCY ADAPTIVE_KKT
-        cuPDLP.KKT_GREEDY,      # NO_RESTART_TO_CURRENT KKT_GREEDY
-        1000,                   # restart_frequency_if_fixed
-        0.36,                   # artificial_restart_threshold
-        0.2,                    # sufficient_reduction_for_restart
-        0.8,                    # necessary_reduction_for_restart
-        0.5,                    # primal_weight_update_smoothing
-    )
-
-    termination_params = cuPDLP.construct_termination_criteria(
-        # optimality_norm = L2,
-        eps_optimal_absolute = tolerance,
-        eps_optimal_relative = tolerance,
-        eps_primal_infeasible = 1.0e-8,
-        eps_dual_infeasible = 1.0e-8,
-        time_sec_limit = time_sec_limit,
-        iteration_limit = iteration_limit,
-        kkt_matrix_pass_limit = Inf,
-    )
-
-    if adaptive_step_size
-        step_size_policy_params = cuPDLP.AdaptiveStepsizeParams(0.3,0.6)
-    else
-        step_size_policy_params = cuPDLP.ConstantStepsizeParams()
-    end
-
-    params = cuPDLP.PdhgParameters(
-        10, # ruiz scaling iterations
-        false, # off l2 scaling
-        1.0, # Pock scaling coefficient: l1 norm
-        1.0, # primal importance, control initial primal weight
-        true, # scale initial primal weight
-        2,# verbosity
-        true, # record iteration stats
-        64, # termination evaluation frequency
-        termination_params,
-        restart_params,
-        step_size_policy_params,
-        online_scaling,
-        learning_rate,
-        adaptive_primal_weight,
-    )
     
-    solve_instance_and_output(
-        params,
-        output_directory,
-        instance_path,
-    )
+    problem_folder = joinpath("data", dataset)
+    all_instances = readdir(problem_folder)
+    len = length(all_instances)
 
+    for i in 1:len
+        instance_path = joinpath(problem_folder, all_instances[i])
+        instance_name = replace(basename(instance_path), r"\.(mps|MPS|qps|QPS)(\.gz)?$" => "")
+        try
+            output_directory = joinpath("output/solver_output", dataset, experiment_name,instance_name)
+
+            if !isdir(output_directory)
+                mkpath(output_directory)
+            else
+                println("Instance already solved: ", i, instance_path)
+                continue
+            end
+
+            if learning_rate > 0.0
+                iteration_limit = get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
+            end
+
+            restart_params = cuPDLP.construct_restart_parameters(
+                cuPDLP.ADAPTIVE_KKT,    # NO_RESTARTS FIXED_FREQUENCY ADAPTIVE_KKT
+                cuPDLP.KKT_GREEDY,      # NO_RESTART_TO_CURRENT KKT_GREEDY
+                1000,                   # restart_frequency_if_fixed
+                0.36,                   # artificial_restart_threshold
+                0.2,                    # sufficient_reduction_for_restart
+                0.8,                    # necessary_reduction_for_restart
+                0.5,                    # primal_weight_update_smoothing
+            )
+
+            termination_params = cuPDLP.construct_termination_criteria(
+                # optimality_norm = L2,
+                eps_optimal_absolute = tolerance,
+                eps_optimal_relative = tolerance,
+                eps_primal_infeasible = 1.0e-8,
+                eps_dual_infeasible = 1.0e-8,
+                time_sec_limit = time_sec_limit,
+                iteration_limit = iteration_limit, # no iteration limit
+                kkt_matrix_pass_limit = Inf,
+            )
+
+            if adaptive_step_size
+                step_size_policy_params = cuPDLP.AdaptiveStepsizeParams(0.3,0.6)
+            else
+                step_size_policy_params = cuPDLP.ConstantStepsizeParams()
+            end
+
+            params = cuPDLP.PdhgParameters(
+                10, # ruiz scaling iterations
+                false, # off l2 scaling
+                1.0, # Pock scaling coefficient: l1 norm
+                1.0, # primal importance, control initial primal weight
+                true, # scale initial primal weight
+                2,# verbosity
+                true, # record iteration stats
+                64, # termination evaluation frequency
+                termination_params,
+                restart_params,
+                step_size_policy_params,
+                online_scaling,
+                learning_rate,
+                adaptive_primal_weight,
+            )
+            
+            lp = cuPDLP.qps_reader_to_standard_form(instance_path)
+            
+            oldstd = stdout
+            redirect_stdout(devnull) # suppress output
+            warm_up(lp); # solve the LP for 100 iterations
+            redirect_stdout(oldstd)
+            
+            solve_instance_and_output(
+                params,
+                output_directory,
+                instance_path,
+            )
+        catch e
+            println("Error in instance: ", i, instance_path)
+            println(e)
+            continue
+        end
+    end
+    write_table(joinpath("output/solver_output", dataset, experiment_name))
 end
 
 main()

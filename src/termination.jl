@@ -199,6 +199,10 @@ function dual_infeasibility_criteria_met(
             eps_dual_infeasible # && ii.primal_ray_quadratic_norm / (-ii.primal_ray_linear_objective) <= eps_dual_infeasible
 end
 
+function exploded_error()
+    error("The algorithm has exploded.")
+end
+
 """
 Checks if the given iteration_stats satisfy the termination criteria. Returns
 a TerminationReason if so, and false otherwise.
