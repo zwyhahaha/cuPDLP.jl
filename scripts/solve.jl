@@ -176,15 +176,23 @@ end
 function get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
     experiment_name = "adaPDLP_time_$(time_sec_limit)_tol_$(tolerance)_lr_0.0"
     ada_directory = joinpath("output/solver_output", dataset, experiment_name, instance_name)
-    ada_json_file = filter(x -> endswith(x, ".json"), readdir(ada_directory))
-    ada_json_file = joinpath(ada_directory, ada_json_file[1])
-    ada_iter = get_iteration_from_json(ada_json_file)
+    if !isdir(ada_directory)
+        ada_iter =  typemax(Int32)
+    else
+        ada_json_file = filter(x -> endswith(x, ".json"), readdir(ada_directory))
+        ada_json_file = joinpath(ada_directory, ada_json_file[1])
+        ada_iter = get_iteration_from_json(ada_json_file)
+    end
 
     experiment_name = "basicPDLP_time_$(time_sec_limit)_tol_$(tolerance)_lr_0.0"
     basic_directory = joinpath("output/solver_output", dataset, experiment_name, instance_name)
-    basic_json_file = filter(x -> endswith(x, ".json"), readdir(basic_directory))
-    basic_json_file = joinpath(basic_directory, basic_json_file[1])
-    basic_iter = get_iteration_from_json(basic_json_file)
+    if !isdir(basic_directory)
+        basic_iter =  typemax(Int32)
+    else
+        basic_json_file = filter(x -> endswith(x, ".json"), readdir(basic_directory))
+        basic_json_file = joinpath(basic_directory, basic_json_file[1])
+        basic_iter = get_iteration_from_json(basic_json_file)
+    end
 
     return min(ada_iter, basic_iter) * 5
 end
