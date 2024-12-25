@@ -186,7 +186,7 @@ function get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
     basic_json_file = joinpath(basic_directory, basic_json_file[1])
     basic_iter = get_iteration_from_json(basic_json_file)
 
-    return max(ada_iter, basic_iter) * 5
+    return min(ada_iter, basic_iter) * 5
 end
 
 function main()
