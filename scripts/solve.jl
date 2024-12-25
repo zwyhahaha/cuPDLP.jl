@@ -194,7 +194,7 @@ function get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
         basic_iter = get_iteration_from_json(basic_json_file)
     end
 
-    return min(ada_iter, basic_iter) * 5
+    return min(min(ada_iter, basic_iter) * 5, typemax(Int32))
 end
 
 function main()
