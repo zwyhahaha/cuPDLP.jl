@@ -243,9 +243,9 @@ function main()
                 continue
             end
 
-            if learning_rate > 0.0
-                iteration_limit = get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
-            end
+            # if learning_rate > 0.0
+            #     iteration_limit = get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
+            # end
 
             restart_params = cuPDLP.construct_restart_parameters(
                 cuPDLP.ADAPTIVE_KKT,    # NO_RESTARTS FIXED_FREQUENCY ADAPTIVE_KKT

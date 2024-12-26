@@ -2,3 +2,4 @@ output
 .vscode
 note.md
 data
+scripts/json2csv.py
