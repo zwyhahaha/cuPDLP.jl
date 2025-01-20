@@ -23,7 +23,7 @@ struct PdhgParameters
     }
     online_scaling::Bool
     learning_rate::Float64
-    adaptive_primal_weight::Bool
+    normalize::Bool
 end
 
 mutable struct CuPdhgSolverState
@@ -33,10 +33,6 @@ mutable struct CuPdhgSolverState
     current_dual_product::CuVector{Float64}
     solution_weighted_avg::CuSolutionWeightedAverage 
     step_size::Union{Float64,CuVector{Float64}}
-    primal_step_size::Union{Float64,CuVector{Float64}}
-    dual_step_size::Union{Float64,CuVector{Float64}}
-    primal_step_size_v::Union{Nothing,CuVector{Float64}} # second order momentum of primal step size
-    dual_step_size_v::Union{Nothing,CuVector{Float64}} # second order momentum of dual step size
     primal_weight::Float64
     numerical_error::Bool
     cumulative_kkt_passes::Float64
@@ -44,6 +40,7 @@ mutable struct CuPdhgSolverState
     required_ratio::Union{Float64,Nothing}
     ratio_step_sizes::Union{Float64,Nothing}
     learning_rate::Float64
+    online_scaling::Bool
 end
 
 mutable struct CuBufferState
@@ -53,12 +50,7 @@ mutable struct CuBufferState
     delta_dual_product::CuVector{Float64}
 end
 
-mutable struct CuHyperGradState
-    primal_hypergradient::CuVector{Float64}
-    dual_hypergradient::CuVector{Float64}
-    primal_momentum::CuVector{Float64}
-    dual_momentum::CuVector{Float64}
-end
+
 
 function define_norms(
     primal_size::Int64,
@@ -67,20 +59,6 @@ function define_norms(
     primal_weight::Float64,
 )
     return 1 / step_size * primal_weight, 1 / step_size / primal_weight
-end
-
-"""
-Compute the primal and dual norms for step size vectors
-"""
-function define_norms_vec(
-    primal_size::Int64,
-    dual_size::Int64,
-    primal_step_size::CuVector{Float64},
-    dual_step_size::CuVector{Float64},
-)
-    primal_norm = CUDA.norm(primal_step_size)
-    dual_norm = CUDA.norm(dual_step_size)
-    return primal_norm, dual_norm
 end
 
 function pdhg_specific_log(
@@ -208,33 +186,13 @@ function compute_next_primal_solution_kernel!(
     primal_step_size::Float64,
     num_variables::Int64,
     delta_primal::CuDeviceVector{Float64},
+    primal_hyperparam::CuDeviceVector{Float64},
 )
     tx = threadIdx().x + (blockDim().x * (blockIdx().x - 0x1))
-    primal_step_size_grad = 0.0
+    # primal_step_size_grad = 0.0
     if tx <= num_variables
         @inbounds begin
-            delta_primal[tx] = current_primal_solution[tx] - primal_step_size * (objective_vector[tx] - current_dual_product[tx])
-            delta_primal[tx] = min(variable_upper_bound[tx], max(variable_lower_bound[tx], delta_primal[tx]))
-            delta_primal[tx] -= current_primal_solution[tx]
-        end
-    end
-    return 
-end
-
-function compute_next_primal_solution_kernel!(
-    objective_vector::CuDeviceVector{Float64},
-    variable_lower_bound::CuDeviceVector{Float64},
-    variable_upper_bound::CuDeviceVector{Float64},
-    current_primal_solution::CuDeviceVector{Float64},
-    current_dual_product::CuDeviceVector{Float64},
-    primal_step_size::CuDeviceVector{Float64},
-    num_variables::Int64,
-    delta_primal::CuDeviceVector{Float64},
-)
-    tx = threadIdx().x + (blockDim().x * (blockIdx().x - 0x1))
-    if tx <= num_variables
-        @inbounds begin
-            delta_primal[tx] = current_primal_solution[tx] - primal_step_size[tx] * (objective_vector[tx] - current_dual_product[tx])
+            delta_primal[tx] = current_primal_solution[tx] - primal_step_size * primal_hyperparam[tx] * (objective_vector[tx] - current_dual_product[tx])
             delta_primal[tx] = min(variable_upper_bound[tx], max(variable_lower_bound[tx], delta_primal[tx]))
             delta_primal[tx] -= current_primal_solution[tx]
         end
@@ -252,6 +210,7 @@ function compute_next_primal_solution!(
     primal_step_size::Union{Float64,CuVector{Float64}},
     delta_primal::CuVector{Float64},
     delta_primal_product::CuVector{Float64},
+    primal_hyperparam::CuVector{Float64},
 )
     NumBlockPrimal = ceil(Int64, problem.num_variables/ThreadPerBlock)
 
@@ -265,6 +224,7 @@ function compute_next_primal_solution!(
         primal_step_size,
         problem.num_variables,
         delta_primal,
+        primal_hyperparam,
     )
     # matrix-vector multiplication, and get delta_primal_product
     CUDA.CUSPARSE.mv!('N', 1, problem.constraint_matrix, delta_primal, 0, delta_primal_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
@@ -279,51 +239,23 @@ function compute_next_dual_solution_kernel!(
     current_dual_solution::CuDeviceVector{Float64},
     current_primal_product::CuDeviceVector{Float64},
     delta_primal_product::CuDeviceVector{Float64},
-    dual_step_size::CuDeviceVector{Float64},
-    extrapolation_coefficient::Float64,
-    num_equalities::Int64,
-    num_constraints::Int64,
-    delta_dual::CuDeviceVector{Float64},
-)
-    tx = threadIdx().x + (blockDim().x * (blockIdx().x - 0x1))
-    if tx <= num_equalities
-        @inbounds begin
-            delta_dual[tx] = current_dual_solution[tx] + dual_step_size[tx] * (right_hand_side[tx] - (1 + extrapolation_coefficient) * delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx])
-
-            delta_dual[tx] -= current_dual_solution[tx]
-        end
-    elseif num_equalities + 1 <= tx <= num_constraints
-        @inbounds begin
-            delta_dual[tx] = current_dual_solution[tx] + dual_step_size[tx] * (right_hand_side[tx] - (1 + extrapolation_coefficient) * delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx])
-            delta_dual[tx] = max(delta_dual[tx], 0.0)
-
-            delta_dual[tx] -= current_dual_solution[tx]
-        end
-    end
-    return
-end
-
-function compute_next_dual_solution_kernel!(
-    right_hand_side::CuDeviceVector{Float64},
-    current_dual_solution::CuDeviceVector{Float64},
-    current_primal_product::CuDeviceVector{Float64},
-    delta_primal_product::CuDeviceVector{Float64},
     dual_step_size::Float64,
     extrapolation_coefficient::Float64,
     num_equalities::Int64,
     num_constraints::Int64,
     delta_dual::CuDeviceVector{Float64},
+    dual_hyperparam::CuDeviceVector{Float64},
 )
     tx = threadIdx().x + (blockDim().x * (blockIdx().x - 0x1))
     if tx <= num_equalities
         @inbounds begin
-            delta_dual[tx] = current_dual_solution[tx] + dual_step_size .* (right_hand_side[tx] - (1 + extrapolation_coefficient) * delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx])
+            delta_dual[tx] = current_dual_solution[tx] + dual_step_size * dual_hyperparam[tx] * (right_hand_side[tx] - (1 + extrapolation_coefficient) * delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx])
 
             delta_dual[tx] -= current_dual_solution[tx]
         end
     elseif num_equalities + 1 <= tx <= num_constraints
         @inbounds begin
-            delta_dual[tx] = current_dual_solution[tx] + dual_step_size .* (right_hand_side[tx] - (1 + extrapolation_coefficient) * delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx])
+            delta_dual[tx] = current_dual_solution[tx] + dual_step_size * dual_hyperparam[tx] * (right_hand_side[tx] - (1 + extrapolation_coefficient) * delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx])
             delta_dual[tx] = max(delta_dual[tx], 0.0)
 
             delta_dual[tx] -= current_dual_solution[tx]
@@ -344,6 +276,7 @@ function compute_next_dual_solution!(
     current_primal_product::CuVector{Float64},
     delta_dual::CuVector{Float64},
     delta_dual_product::CuVector{Float64},
+    dual_hyperparam::CuVector{Float64},
     extrapolation_coefficient::Float64 = 1.0,
 )
     NumBlockDual = ceil(Int64, problem.num_constraints/ThreadPerBlock)
@@ -358,6 +291,7 @@ function compute_next_dual_solution!(
         problem.num_equalities,
         problem.num_constraints,
         delta_dual,
+        dual_hyperparam,
     )
 
     CUDA.CUSPARSE.mv!('N', 1, problem.constraint_matrix_t, delta_dual, 0, delta_dual_product, 'O', CUDA.CUSPARSE.CUSPARSE_SPMV_CSR_ALG2)
@@ -417,6 +351,7 @@ function take_step!(
     problem::CuLinearProgrammingProblem,
     solver_state::CuPdhgSolverState,
     buffer_state::CuBufferState,
+    hyper_state::Union{CuHyperState,Nothing},
 )
     step_size = solver_state.step_size
     primal_weight = solver_state.primal_weight
@@ -432,6 +367,7 @@ function take_step!(
             (step_size / primal_weight),
             buffer_state.delta_primal,
             buffer_state.delta_primal_product,
+            hyper_state.primal_hyperparam,
         )
 
         compute_next_dual_solution!(
@@ -442,6 +378,7 @@ function take_step!(
             solver_state.current_primal_product,
             buffer_state.delta_dual,
             buffer_state.delta_dual_product,
+            hyper_state.dual_hyperparam,
         )
 
 
@@ -470,6 +407,16 @@ function take_step!(
                 solver_state, 
                 buffer_state,
             )
+
+            if solver_state.online_scaling && solver_state.learning_rate > 0.0
+                update_hyper_state!(
+                    hyper_state,
+                    problem,
+                    solver_state,
+                    buffer_state,
+                    step_size
+                )
+            end
             done = true
         end
 
@@ -480,7 +427,7 @@ function take_step!(
 
         step_size = min(first_term, second_term)
         
-    end  
+    end
     solver_state.step_size = step_size
 end
 
@@ -492,133 +439,233 @@ function take_step!(
     problem::CuLinearProgrammingProblem,
     solver_state::CuPdhgSolverState,
     buffer_state::CuBufferState,
+    hyper_state::Union{CuHyperState,Nothing},
 )
+    step_size = solver_state.step_size
+    primal_weight = solver_state.primal_weight
+
     compute_next_primal_solution!(
         problem,
         solver_state.current_primal_solution,
         solver_state.current_dual_product,
-        solver_state.primal_step_size,
+        (step_size / primal_weight),
         buffer_state.delta_primal,
         buffer_state.delta_primal_product,
+        hyper_state.primal_hyperparam,
     )
     
     compute_next_dual_solution!(
         problem,
         solver_state.current_dual_solution,
-        solver_state.dual_step_size,
+        (step_size * primal_weight),
         buffer_state.delta_primal_product,
         solver_state.current_primal_product,
         buffer_state.delta_dual,
         buffer_state.delta_dual_product,
+        hyper_state.dual_hyperparam,
     )
 
     solver_state.cumulative_kkt_passes += 1
-
-    if solver_state.learning_rate > 0.0
-        update_step_size!(
-            problem,
-            solver_state,
-            buffer_state,
-        )
-    end
 
     update_solution_in_solver_state!(
         problem,
         solver_state,
         buffer_state,
     )
+
+    if solver_state.online_scaling && solver_state.learning_rate > 0.0
+        update_hyper_state!(
+            hyper_state,
+            problem,
+            solver_state,
+            buffer_state,
+            step_size
+        )
+    end
 end
 
-function update_primal_step_size_kernel!(
+function update_primal_hyper_state_kernel!(
+    primal_hyperparam::CuDeviceVector{Float64},
+    primal_hypergradient::CuDeviceVector{Float64},
+    primal_hypermomentum::CuDeviceVector{Float64},
     objective_vector::CuDeviceVector{Float64},
     current_dual_product::CuDeviceVector{Float64},
     delta_dual_product::CuDeviceVector{Float64},
-    learning_rate::Float64,
-    num_variables::Int64,
-    primal_step_size::CuDeviceVector{Float64},
-    primal_step_size_v::CuDeviceVector{Float64},
+    current_primal_solution::CuDeviceVector{Float64},
+    variable_upper_bound::CuDeviceVector{Float64},
+    variable_lower_bound::CuDeviceVector{Float64},
     primal_norm_squared::Float64,
+    primal_step_size::Float64,
+    num_variables::Int64,
+    learning_rate::Float64,
 )
     tx = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
 
     if tx <= num_variables
         @inbounds begin
-            primal_step_size_grad = (objective_vector[tx] - current_dual_product[tx] - delta_dual_product[tx]) * (objective_vector[tx] - current_dual_product[tx]) / primal_norm_squared
-            primal_step_size_v[tx] += primal_step_size_grad * primal_step_size_grad
-            primal_step_size[tx] += learning_rate * primal_step_size_grad / sqrt(primal_step_size_v[tx] + eps())
+            if current_primal_solution[tx] >= variable_upper_bound[tx] || current_primal_solution[tx] <= variable_lower_bound[tx]
+                primal_hypergradient[tx] = 0.0
+            else
+                primal_hypergradient[tx] = primal_step_size * (objective_vector[tx] - current_dual_product[tx] + delta_dual_product[tx]) * (objective_vector[tx] - current_dual_product[tx] + delta_dual_product[tx]) / (primal_norm_squared + eps())
+            end
+            # primal_hypergradient[tx] = primal_step_size * (objective_vector[tx] - current_dual_product[tx] + delta_dual_product[tx]) * (objective_vector[tx] - current_dual_product[tx] + delta_dual_product[tx]) / (primal_norm_squared + eps())
+            primal_hypermomentum[tx] += primal_hypergradient[tx] * primal_hypergradient[tx]
+            primal_hyperparam[tx] += learning_rate * primal_hypergradient[tx] / sqrt(primal_hypermomentum[tx] + eps())
         end
     end
     return 
 end
 
-function update_primal_step_size!(
-    primal_step_size::CuVector{Float64},
-    primal_step_size_v::CuVector{Float64},
+function update_primal_hyper_state!(
+    primal_hyperparam::CuVector{Float64},
+    primal_hypergradient::CuVector{Float64},
+    primal_hypermomentum::CuVector{Float64},
     problem::CuLinearProgrammingProblem,
     current_dual_product::CuVector{Float64},
     delta_dual_product::CuVector{Float64},
-    learning_rate::Float64,
+    current_primal_solution::CuVector{Float64},
     primal_norm_squared::Float64,
+    primal_step_size::Float64,
+    learning_rate::Float64,
 )
     NumBlockPrimal = ceil(Int64, problem.num_variables / ThreadPerBlock)
 
-    CUDA.@sync @cuda threads = ThreadPerBlock blocks = NumBlockPrimal update_primal_step_size_kernel!(
+    CUDA.@sync @cuda threads = ThreadPerBlock blocks = NumBlockPrimal update_primal_hyper_state_kernel!(
+        primal_hyperparam,
+        primal_hypergradient,
+        primal_hypermomentum,
         problem.objective_vector,
         current_dual_product,
         delta_dual_product,
-        learning_rate,
-        problem.num_variables,
-        primal_step_size,
-        primal_step_size_v,
+        current_primal_solution,
+        problem.variable_upper_bound,
+        problem.variable_lower_bound,
         primal_norm_squared,
+        primal_step_size,
+        problem.num_variables,
+        learning_rate,
     )
 end
 
-function update_dual_step_size_kernel!(
+function update_dual_hyper_state_kernel!(
+    dual_hyperparam::CuDeviceVector{Float64},
+    dual_hypergradient::CuDeviceVector{Float64},
+    dual_hypermomentum::CuDeviceVector{Float64},
     right_hand_side::CuDeviceVector{Float64},
     current_primal_product::CuDeviceVector{Float64},
     delta_primal_product::CuDeviceVector{Float64},
-    learning_rate::Float64,
-    num_constraints::Int64,
-    dual_step_size::CuDeviceVector{Float64},
-    dual_step_size_v::CuDeviceVector{Float64},
-    extrapolation_coefficient::Float64,
+    current_dual_solution::CuDeviceVector{Float64},
     dual_norm_squared::Float64,
+    dual_step_size::Float64,
+    num_equalities::Int64,
+    num_constraints::Int64,
+    learning_rate::Float64,
+    extrapolation_coefficient::Float64,
 )
     tx = threadIdx().x + (blockDim().x * (blockIdx().x - 1))
 
-    if tx <= num_constraints
+    if tx <= num_equalities
         @inbounds begin
-            dual_step_size_grad = (right_hand_side[tx] - current_primal_product[tx] - delta_primal_product[tx]) * (right_hand_side[tx] - (1 + extrapolation_coefficient) * delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx]) / dual_norm_squared
-            dual_step_size_v[tx] += dual_step_size_grad * dual_step_size_grad
-            dual_step_size[tx] += learning_rate * dual_step_size_grad / sqrt(dual_step_size_v[tx] + eps())
+            dual_hypergradient[tx] = dual_step_size * (right_hand_side[tx] - current_primal_product[tx]) * (right_hand_side[tx] - delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx]) / (dual_norm_squared + eps())
+            dual_hypermomentum[tx] += dual_hypergradient[tx] * dual_hypergradient[tx]
+            dual_hyperparam[tx] += learning_rate * dual_hypergradient[tx] / sqrt(dual_hypermomentum[tx] + eps())
+        end
+    elseif num_equalities + 1 <= tx <= num_constraints
+        @inbounds begin
+            if current_dual_solution[tx] <= 0.0
+                dual_hypergradient[tx] = 0.0
+            else
+                dual_hypergradient[tx] = dual_step_size * (right_hand_side[tx] - current_primal_product[tx]) * (right_hand_side[tx] - delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx]) / (dual_norm_squared + eps())
+            end
+            # dual_hypergradient[tx] = dual_step_size * (right_hand_side[tx] - current_primal_product[tx]) * (right_hand_side[tx] - delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx]) / (dual_norm_squared + eps())
+            dual_hypermomentum[tx] += dual_hypergradient[tx] * dual_hypergradient[tx]
+            dual_hyperparam[tx] += learning_rate * dual_hypergradient[tx] / sqrt(dual_hypermomentum[tx] + eps())
         end
     end
     return 
 end
 
-function update_dual_step_size!(
-    dual_step_size::CuVector{Float64},
-    dual_step_size_v::CuVector{Float64},
+function update_dual_hyper_state!(
+    dual_hyperparam::CuVector{Float64},
+    dual_hypergradient::CuVector{Float64},
+    dual_hypermomentum::CuVector{Float64},
     problem::CuLinearProgrammingProblem,
     current_primal_product::CuVector{Float64},
     delta_primal_product::CuVector{Float64},
+    current_dual_solution::CuVector{Float64},
+    dual_norm_squared::Float64,
+    dual_step_size::Float64,
     learning_rate::Float64,
     extrapolation_coefficient::Float64,
-    dual_norm_squared::Float64,
 )
     NumBlockDual = ceil(Int64, problem.num_constraints / ThreadPerBlock)
 
-    CUDA.@sync @cuda threads = ThreadPerBlock blocks = NumBlockDual update_dual_step_size_kernel!(
+    CUDA.@sync @cuda threads = ThreadPerBlock blocks = NumBlockDual update_dual_hyper_state_kernel!(
+        dual_hyperparam,
+        dual_hypergradient,
+        dual_hypermomentum,
         problem.right_hand_side,
         current_primal_product,
         delta_primal_product,
-        learning_rate,
-        problem.num_constraints,
-        dual_step_size,
-        dual_step_size_v,
-        extrapolation_coefficient,
+        current_dual_solution,
         dual_norm_squared,
+        dual_step_size,
+        problem.num_equalities,
+        problem.num_constraints,
+        learning_rate,
+        extrapolation_coefficient
+    )
+end
+
+function update_hyper_state!(
+    hyper_state::CuHyperState,
+    problem::CuLinearProgrammingProblem,
+    solver_state::CuPdhgSolverState,
+    buffer_state::CuBufferState,
+    step_size::Float64,
+    extrapolation_coefficient::Float64 = 1.0,
+)
+
+    if hyper_state.normalize
+        primal_norm_squared, dual_norm_squared = compute_norms(
+            problem.objective_vector,
+            problem.right_hand_side,
+            solver_state.current_dual_product.-buffer_state.delta_dual_product,
+            solver_state.current_primal_product,
+        )
+    else
+        primal_norm_squared = 1.0
+        dual_norm_squared = 1.0
+    end
+
+    primal_weight = solver_state.primal_weight
+    learning_rate = solver_state.learning_rate
+
+    update_primal_hyper_state!(
+        hyper_state.primal_hyperparam,
+        hyper_state.primal_hypergradient,
+        hyper_state.primal_hypermomentum,
+        problem,
+        solver_state.current_dual_product,
+        buffer_state.delta_dual_product,
+        solver_state.current_primal_solution,
+        primal_norm_squared,
+        (step_size / primal_weight),
+        learning_rate,
+    )
+
+    update_dual_hyper_state!(
+        hyper_state.dual_hyperparam,
+        hyper_state.dual_hypergradient,
+        hyper_state.dual_hypermomentum,
+        problem,
+        solver_state.current_primal_product,
+        buffer_state.delta_primal_product,
+        solver_state.current_dual_solution,
+        dual_norm_squared,
+        (step_size * primal_weight),
+        learning_rate,
+        extrapolation_coefficient,
     )
 end
 
@@ -633,45 +680,6 @@ function compute_norms(
     return primal_norm_squared, dual_norm_squared
 end
 
-function update_step_size!(
-    problem::CuLinearProgrammingProblem,
-    solver_state::CuPdhgSolverState,
-    buffer_state::CuBufferState,
-    extrapolation_coefficient::Float64 = 1.0,
-)
-    primal_norm_squared, dual_norm_squared = compute_norms(
-        problem.objective_vector,
-        problem.right_hand_side,
-        solver_state.current_dual_product,
-        solver_state.current_primal_product,
-    )
-
-    if primal_norm_squared > 1e20 || dual_norm_squared > 1e20
-        solver_state.numerical_error = true
-    end
-
-    update_primal_step_size!(
-        solver_state.primal_step_size,
-        solver_state.primal_step_size_v,
-        problem,
-        solver_state.current_dual_product,
-        buffer_state.delta_dual_product,
-        solver_state.learning_rate,
-        primal_norm_squared,
-    )
-
-    update_dual_step_size!(
-        solver_state.dual_step_size,
-        solver_state.dual_step_size_v,
-        problem,
-        solver_state.current_primal_product,
-        buffer_state.delta_primal_product,
-        solver_state.learning_rate,
-        extrapolation_coefficient,
-        dual_norm_squared,
-    )
-
-end
 
 """
 Main algorithm: given parameters and LP problem, return solutions
@@ -682,9 +690,18 @@ function optimize(
 )
     validate(original_problem)
     qp_cache = cached_quadratic_program_info(original_problem)
+    buffer_lp = qp_cpu_to_gpu(original_problem)
 
     start_rescaling_time = time()
     Printf.@printf("Rescaling problem...\n")
+    # d_scaled_problem = rescale_problem(
+    #     params.l_inf_ruiz_iterations,
+    #     params.l2_norm_rescaling,
+    #     params.pock_chambolle_alpha,
+    #     params.verbosity,
+    #     buffer_lp,
+    # )
+
     scaled_problem = rescale_problem(
         params.l_inf_ruiz_iterations,
         params.l2_norm_rescaling,
@@ -692,38 +709,37 @@ function optimize(
         params.verbosity,
         original_problem,
     )
+    d_scaled_problem = scaledqp_cpu_to_gpu(scaled_problem)
+
     rescaling_time = time() - start_rescaling_time
     Printf.@printf(
         "Preconditioning Time (seconds): %.2e\n",
         rescaling_time,
     )
 
-    primal_size = length(scaled_problem.scaled_qp.variable_lower_bound)
-    dual_size = length(scaled_problem.scaled_qp.right_hand_side)
-    num_eq = scaled_problem.scaled_qp.num_equalities
+    primal_size = length(d_scaled_problem.scaled_qp.variable_lower_bound)
+    dual_size = length(d_scaled_problem.scaled_qp.right_hand_side)
+    num_eq = d_scaled_problem.scaled_qp.num_equalities
     if params.primal_importance <= 0 || !isfinite(params.primal_importance)
         error("primal_importance must be positive and finite")
     end
 
     # transfer LP from cpu to gpu
-    d_scaled_problem = scaledqp_cpu_to_gpu(scaled_problem)
     d_problem = d_scaled_problem.scaled_qp
-    buffer_lp = qp_cpu_to_gpu(original_problem)
-
 
     # initialization
+    learning_rate = params.learning_rate
+
     if params.online_scaling
-        primal_step_size = CUDA.zeros(Float64, primal_size)
-        dual_step_size = CUDA.zeros(Float64, dual_size)
-        primal_step_size_v = CUDA.zeros(Float64, primal_size)
-        dual_step_size_v = CUDA.zeros(Float64, dual_size)
-        learning_rate = params.learning_rate
-    else
-        primal_step_size = 0.0
-        dual_step_size = 0.0
-        primal_step_size_v = nothing
-        dual_step_size_v = nothing
-        learning_rate = 0.0
+        hyper_state = CuHyperState(
+            CUDA.ones(Float64, primal_size),
+            CUDA.ones(Float64, dual_size),
+            CUDA.zeros(Float64, primal_size),
+            CUDA.zeros(Float64, dual_size),
+            CUDA.zeros(Float64, primal_size),
+            CUDA.zeros(Float64, dual_size),
+            params.normalize,
+        )
     end
 
     solver_state = CuPdhgSolverState(
@@ -733,10 +749,6 @@ function optimize(
         CUDA.zeros(Float64, primal_size),    # current_dual_product
         initialize_solution_weighted_average(primal_size, dual_size),
         0.0,                              # step_size
-        primal_step_size,                 # primal_step_size
-        dual_step_size,                   # dual_step_size
-        primal_step_size_v,               # primal_step_size_v
-        dual_step_size_v,                 # dual_step_size_v
         1.0,                 # primal_weight
         false,               # numerical_error
         0.0,                 # cumulative_kkt_passes
@@ -744,6 +756,7 @@ function optimize(
         nothing,
         nothing,
         learning_rate,
+        params.online_scaling,
     )
 
     buffer_state = CuBufferState(
@@ -810,7 +823,9 @@ function optimize(
     if params.step_size_policy_params isa AdaptiveStepsizeParams
         solver_state.cumulative_kkt_passes += 0.5
         step_size = 1.0 / norm(scaled_problem.scaled_qp.constraint_matrix, Inf)
+        # step_size = 1.0 / CUDA.norm(d_scaled_problem.scaled_qp.constraint_matrix, Inf)
     else
+        # step_size = 1.0 / CUDA.norm(d_scaled_problem.scaled_qp.constraint_matrix, 2)
         desired_relative_error = 1e-6
         maximum_singular_value, number_of_power_iterations =
             estimate_maximum_singular_value(
@@ -823,23 +838,17 @@ function optimize(
         solver_state.cumulative_kkt_passes += number_of_power_iterations
     end
 
-    if params.online_scaling
-        solver_state.primal_step_size .= CUDA.fill(step_size, primal_size)
-        solver_state.dual_step_size .= CUDA.fill(step_size, dual_size)
-    else
-        solver_state.primal_step_size = step_size
-        solver_state.dual_step_size = step_size
-    end
-
     solver_state.step_size = step_size
-    solver_state.learning_rate = params.learning_rate * step_size * step_size
+    if params.online_scaling
+        solver_state.learning_rate = params.learning_rate
+    else
+        solver_state.learning_rate = 0.0
+    end
 
     KKT_PASSES_PER_TERMINATION_EVALUATION = 2.0
 
     # Primal weight
-    if params.online_scaling
-        solver_state.primal_weight = 1.0
-    elseif params.scale_invariant_initial_primal_weight
+    if params.scale_invariant_initial_primal_weight
         solver_state.primal_weight = select_initial_primal_weight(
             d_scaled_problem.scaled_qp,
             1.0,
@@ -923,21 +932,12 @@ function optimize(
             method_specific_stats["time_spent_doing_basic_algorithm"] =
                 time_spent_doing_basic_algorithm
             
-            if params.online_scaling
-                primal_norm_params, dual_norm_params = define_norms_vec(
-                    primal_size,
-                    dual_size,
-                    solver_state.primal_step_size,
-                    solver_state.dual_step_size,
-                )
-            else
-                primal_norm_params, dual_norm_params = define_norms(
-                    primal_size,
-                    dual_size,
-                    solver_state.step_size,
-                    solver_state.primal_weight,
-                )
-            end
+            primal_norm_params, dual_norm_params = define_norms(
+                primal_size,
+                dual_size,
+                solver_state.step_size,
+                solver_state.primal_weight,
+            )
             
             ### check termination criteria ###
             termination_reason = check_termination_criteria(
@@ -945,6 +945,7 @@ function optimize(
                 qp_cache,
                 current_iteration_stats,
             )
+
             if solver_state.numerical_error && termination_reason == false
                 termination_reason = TERMINATION_REASON_NUMERICAL_ERROR
             end
@@ -984,7 +985,7 @@ function optimize(
                 )
 
                 pdhg_final_log(
-                    scaled_problem.scaled_qp,
+                    original_problem,
                     avg_primal_solution,
                     avg_dual_solution,
                     params.verbosity,
@@ -994,7 +995,7 @@ function optimize(
                 )
                 # Terminate here!
                 return unscaled_saddle_point_output(
-                    scaled_problem,
+                    d_scaled_problem,
                     avg_primal_solution,
                     avg_dual_solution,
                     termination_reason,
@@ -1027,19 +1028,14 @@ function optimize(
 
             # Update primal weight
             if current_iteration_stats.restart_used != RESTART_CHOICE_NO_RESTART
-                if params.adaptive_primal_weight
-                    solver_state.primal_weight = compute_new_primal_weight(
-                        last_restart_info,
-                        solver_state.primal_weight,
-                        primal_weight_update_smoothing,
-                        params.verbosity,
-                    )
-                else
-                    solver_state.primal_weight = 1.0
-                end
+                solver_state.primal_weight = compute_new_primal_weight(
+                    last_restart_info,
+                    solver_state.primal_weight,
+                    primal_weight_update_smoothing,
+                    params.verbosity,
+                )
                 solver_state.ratio_step_sizes = 1.0
             end
-
         end # End operations in check_freq
 
         time_spent_doing_basic_algorithm_checkpoint = time()
@@ -1058,10 +1054,14 @@ function optimize(
                 solver_state.required_ratio,
                 solver_state.primal_weight,
             )
-          end
+        end
         
         # doing PDHG step
-        take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state)
+        if params.online_scaling
+            take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state, hyper_state)
+        else
+            take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state, nothing)
+        end
 
         time_spent_doing_basic_algorithm += time() - time_spent_doing_basic_algorithm_checkpoint
     end

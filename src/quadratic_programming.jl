@@ -66,6 +66,28 @@ mutable struct QuadraticProgrammingProblem
   num_equalities::Int64
 end
 
+mutable struct CuLinearProgrammingProblem
+  num_variables::Int64
+  num_constraints::Int64
+  variable_lower_bound::CuVector{Float64}
+  variable_upper_bound::CuVector{Float64}
+  isfinite_variable_lower_bound::CuVector{Bool}
+  isfinite_variable_upper_bound::CuVector{Bool}
+  objective_vector::CuVector{Float64}
+  objective_constant::Float64
+  constraint_matrix::CUDA.CUSPARSE.CuSparseMatrixCSR{Float64,Int32}
+  constraint_matrix_t::CUDA.CUSPARSE.CuSparseMatrixCSR{Float64,Int32}
+  right_hand_side::CuVector{Float64}
+  num_equalities::Int64
+end
+
+mutable struct CuScaledQpProblem
+  original_qp::CuLinearProgrammingProblem
+  scaled_qp::CuLinearProgrammingProblem
+  constraint_rescaling::CuVector{Float64}
+  variable_rescaling::CuVector{Float64}
+end
+
 """
 Estimates the variable and constraint hardness for a first-order method given
 a solution vector. By hardness we mean roughly how much does the constraint or

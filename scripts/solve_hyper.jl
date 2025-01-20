@@ -3,7 +3,7 @@ import GZip
 import JSON3
 import JSON
 
-import cuPDLP
+include("/home/shanshu/opt/cuPDLP.jl/src/cuPDLP.jl")
 
 function write_vector_to_file(filename, vector)
     open(filename, "w") do io
@@ -114,10 +114,9 @@ function warm_up(lp::cuPDLP.QuadraticProgrammingProblem)
         64, # termination evaluation frequency
         termination_params_warmup,
         restart_params,
-        cuPDLP.ConstantStepsizeParams(), # adaptive stepsize parameters (reduction, growth exponent)
-        true, # online scaling
-        0.1, # online learning rate
-        false, # adaptive primal weight
+        cuPDLP.AdaptiveStepsizeParams(0.3,0.6), # adaptive stepsize parameters (reduction, growth exponent)
+        false, # online scaling
+        0., # online learning rate
     )
 
     cuPDLP.optimize(params_warmup, lp);
@@ -131,17 +130,21 @@ function parse_command_line()
         "--instance_name"
         help = "The name of the instance to solve in .mps.gz or .mps format."
         arg_type = String
-        required = true
+        default = "neos5"
+        # required = true
+
 
         "--dataset"
         help = "dataset name"
         arg_type = String
-        required = true
+        default = "MIPLIB"
+        # required = true
 
         "--experiment_name"
         help = "experiment name."
         arg_type = String
-        required = true
+        default = "hyperPDLP"
+        # required = true
 
         "--tolerance"
         help = "KKT tolerance of the solution."
@@ -207,26 +210,14 @@ function main()
     learning_rate = parsed_args["learning_rate"]
 
     if experiment_name == "adaPDLP"
-        adaptive_step_size = true
-        adaptive_primal_weight = true
         online_scaling = false
         learning_rate = 0.0
-        iteration_limit = typemax(Int32)
-    elseif experiment_name == "osPDLP"
-        adaptive_step_size = false
-        adaptive_primal_weight = false
+    elseif experiment_name == "hyperPDLP"
         online_scaling = true
-        iteration_limit = get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
-    elseif experiment_name == "basicPDLP"
-        adaptive_step_size = false
-        adaptive_primal_weight = false
-        online_scaling = false
-        learning_rate = 0.0
-        iteration_limit = typemax(Int32)
     else
-        error("Unknown experiment name: ", experiment_name)
+        error("Invalid experiment name")
     end
-
+    
     experiment_name = "$(experiment_name)_time_$(time_sec_limit)_tol_$(tolerance)_lr_$(learning_rate)"
 
     instance_path = joinpath("data", dataset, "$(instance_name).mps.gz")
@@ -238,12 +229,12 @@ function main()
 
     lp = cuPDLP.qps_reader_to_standard_form(instance_path)
 
-    println("warm up start")
-    oldstd = stdout
-    redirect_stdout(devnull) # suppress output
-    warm_up(lp); # solve the LP for 100 iterations
-    redirect_stdout(oldstd)
-    println("warm up end")
+    # println("warm up start")
+    # oldstd = stdout
+    # redirect_stdout(devnull) # suppress output
+    # warm_up(lp); # solve the LP for 100 iterations
+    # redirect_stdout(oldstd)
+    # println("warm up end")
 
     restart_params = cuPDLP.construct_restart_parameters(
         cuPDLP.ADAPTIVE_KKT,    # NO_RESTARTS FIXED_FREQUENCY ADAPTIVE_KKT
@@ -262,15 +253,11 @@ function main()
         eps_primal_infeasible = 1.0e-8,
         eps_dual_infeasible = 1.0e-8,
         time_sec_limit = time_sec_limit,
-        iteration_limit = iteration_limit,
+        iteration_limit = 400,
         kkt_matrix_pass_limit = Inf,
     )
 
-    if adaptive_step_size
-        step_size_policy_params = cuPDLP.AdaptiveStepsizeParams(0.3,0.6)
-    else
-        step_size_policy_params = cuPDLP.ConstantStepsizeParams()
-    end
+    step_size_policy_params = cuPDLP.AdaptiveStepsizeParams(0.3,0.6)
 
     params = cuPDLP.PdhgParameters(
         10, # ruiz scaling iterations
@@ -286,7 +273,6 @@ function main()
         step_size_policy_params,
         online_scaling,
         learning_rate,
-        adaptive_primal_weight,
     )
     
     solve_instance_and_output(

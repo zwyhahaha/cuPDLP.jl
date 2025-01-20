@@ -293,10 +293,14 @@ function main()
             
             lp = cuPDLP.qps_reader_to_standard_form(instance_path)
             
-            oldstd = stdout
-            redirect_stdout(devnull) # suppress output
-            warm_up(lp); # solve the LP for 100 iterations
-            redirect_stdout(oldstd)
+            if i == 1
+                println("Warm up start")
+                oldstd = stdout
+                redirect_stdout(devnull) # suppress output
+                warm_up(lp); # solve the LP for 100 iterations
+                redirect_stdout(oldstd)
+                println("Warm up done")
+            end
             
             solve_instance_and_output(
                 params,

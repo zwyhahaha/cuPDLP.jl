@@ -60,9 +60,33 @@ function unscaled_saddle_point_output(
     )
 end
 
+function unscaled_saddle_point_output(
+    scaled_problem::CuScaledQpProblem,
+    primal_solution::AbstractVector{Float64},
+    dual_solution::AbstractVector{Float64},
+    termination_reason::TerminationReason,
+    iterations_completed::Int64,
+    iteration_stats::Vector{IterationStats},
+)
+    # Unscale iterates.
+    variable_scaling = Array(scaled_problem.variable_rescaling)
+    constraint_scaling = Array(scaled_problem.constraint_rescaling)
+    original_primal_solution = primal_solution ./ variable_scaling
+    original_dual_solution = dual_solution ./ constraint_scaling
+
+    return SaddlePointOutput(
+        original_primal_solution,
+        original_dual_solution,
+        termination_reason,
+        termination_reason_to_string(termination_reason),
+        iterations_completed,
+        iteration_stats,
+    )
+end
+
 function weighted_norm(
     vec::CuVector{Float64},
-    weights::Float64,
+    weights::Union{Float64, CuVector{Float64}},
 )
     tmp = CUDA.norm(vec)
     return sqrt(weights) * tmp
@@ -84,6 +108,16 @@ mutable struct CuBufferAvgState
     avg_dual_solution::CuVector{Float64}
     avg_primal_product::CuVector{Float64}
     avg_primal_gradient::CuVector{Float64}
+end
+
+mutable struct CuHyperState
+    primal_hyperparam::CuVector{Float64}
+    dual_hyperparam::CuVector{Float64}
+    primal_hypergradient::CuVector{Float64}
+    dual_hypergradient::CuVector{Float64}
+    primal_hypermomentum::CuVector{Float64}
+    dual_hypermomentum::CuVector{Float64}
+    normalize::Bool
 end
 
 """
@@ -255,8 +289,8 @@ function compute_weight_kkt_residual(
     primal_gradient::CuVector{Float64},
     buffer_kkt::BufferKKTState,
     primal_weight::Float64,
-    primal_norm_params::Float64, 
-    dual_norm_params::Float64, 
+    primal_norm_params::Union{Float64, CuVector{Float64}}, 
+    dual_norm_params::Union{Float64, CuVector{Float64}}, 
 )
     ## construct buffer_kkt
     buffer_kkt.primal_solution = primal_iterate
@@ -266,13 +300,18 @@ function compute_weight_kkt_residual(
 
     compute_primal_residual!(problem, buffer_kkt)
     primal_objective = primal_obj(problem, buffer_kkt.primal_solution)
-    l2_primal_residual = CUDA.norm([buffer_kkt.constraint_violation; buffer_kkt.lower_variable_violation; buffer_kkt.upper_variable_violation], 2)
-
     compute_dual_stats!(problem, buffer_kkt)
     dual_objective = buffer_kkt.dual_stats.dual_objective
-    l2_dual_residual = CUDA.norm([buffer_kkt.dual_stats.dual_residual; buffer_kkt.reduced_costs_violation], 2)
 
-    weighted_kkt_residual = sqrt(primal_weight * l2_primal_residual^2 + 1/primal_weight * l2_dual_residual^2 + abs(primal_objective - dual_objective)^2)
+    if primal_norm_params isa Float64
+        l2_primal_residual = CUDA.norm([buffer_kkt.constraint_violation; buffer_kkt.lower_variable_violation; buffer_kkt.upper_variable_violation], 2)
+        l2_dual_residual = CUDA.norm([buffer_kkt.dual_stats.dual_residual; buffer_kkt.reduced_costs_violation], 2)
+        weighted_kkt_residual = sqrt(primal_weight * l2_primal_residual^2 + 1/primal_weight * l2_dual_residual^2 + abs(primal_objective - dual_objective)^2)
+    else
+        l2_primal_residual = sqrt(weighted_norm(buffer_kkt.constraint_violation, dual_norm_params)^2 + weighted_norm(buffer_kkt.lower_variable_violation, primal_norm_params)^2 + weighted_norm(buffer_kkt.upper_variable_violation, primal_norm_params)^2)
+        l2_dual_residual = sqrt((CUDA.norm(buffer_kkt.dual_stats.dual_residual,2))^2 + weighted_norm(buffer_kkt.reduced_costs_violation, primal_norm_params)^2)
+        weighted_kkt_residual = sqrt(l2_primal_residual^2 + l2_dual_residual^2 + abs(primal_objective - dual_objective)^2)
+    end
 
     return CuKKTrestart(weighted_kkt_residual)
 end
@@ -438,8 +477,8 @@ function should_do_adaptive_restart_kkt(
     last_restart_info::CuRestartInfo,
     primal_weight::Float64,
     buffer_kkt::BufferKKTState,
-    primal_norm_params::Float64,
-    dual_norm_params::Float64,
+    primal_norm_params::Union{Float64, CuVector{Float64}},
+    dual_norm_params::Union{Float64, CuVector{Float64}},
 )
     
     last_restart = compute_weight_kkt_residual(
@@ -483,8 +522,8 @@ function run_restart_scheme(
     current_dual_solution::CuVector{Float64},
     last_restart_info::CuRestartInfo,
     iterations_completed::Int64,
-    primal_norm_params::Float64,
-    dual_norm_params::Float64,
+    primal_norm_params::Union{Float64, CuVector{Float64}},
+    dual_norm_params::Union{Float64, CuVector{Float64}},
     primal_weight::Float64,
     verbosity::Int64,
     restart_params::RestartParameters,
@@ -663,8 +702,8 @@ function update_last_restart_info!(
     avg_primal_solution::CuVector{Float64},
     avg_dual_solution::CuVector{Float64},
     primal_weight::Float64,
-    primal_norm_params::Float64,
-    dual_norm_params::Float64,
+    primal_norm_params::Union{Float64, CuVector{Float64}},
+    dual_norm_params::Union{Float64, CuVector{Float64}},
     candidate_kkt_residual::Union{Nothing,CuKKTrestart},
     restart_length::Int64,
     primal_product::CuVector{Float64},
@@ -749,16 +788,16 @@ function generic_final_log(
         )
     end
 
-    if verbosity >= 7
-        for convergence_information in last_iteration_stats.convergence_information
-            print_infinity_norms(convergence_information)
-        end
-        print_variable_and_constraint_hardness(
-            problem,
-            current_primal_solution,
-            current_dual_solution,
-        )
-    end
+    # if verbosity >= 7
+    #     for convergence_information in last_iteration_stats.convergence_information
+    #         print_infinity_norms(convergence_information)
+    #     end
+    #     print_variable_and_constraint_hardness(
+    #         problem,
+    #         current_primal_solution,
+    #         current_dual_solution,
+    #     )
+    # end
 end
 
 """
@@ -767,8 +806,8 @@ Initialize primal weight
 function select_initial_primal_weight(
     problem::CuLinearProgrammingProblem,
     primal_norm_params::Float64,
-    dual_norm_params::Float64,
-    primal_importance::Float64,
+    dual_norm_params::Union{Float64, CuVector{Float64}},
+    primal_importance::Union{Float64, CuVector{Float64}},
     verbosity::Int64,
 )
     rhs_vec_norm = weighted_norm(problem.right_hand_side, dual_norm_params)
@@ -784,3 +823,111 @@ function select_initial_primal_weight(
     return primal_weight
 end
 
+"""
+Inverse of `scale_problem`
+Rescales `problem` in place. If we let `D = diag(1./cum_variable_rescaling)` and
+`E = diag(1./cum_constraint_rescaling)`, then `problem` is modified such that:
+
+    objective_matrix = D objective_matrix D
+    objective_vector = D objective_vector
+    objective_constant = objective_constant
+    variable_lower_bound = D^-1 variable_lower_bound
+    variable_upper_bound = D^-1 variable_upper_bound
+    constraint_matrix = E constraint_matrix D
+    right_hand_side = E right_hand_side
+
+The scaling vectors must be positive.
+"""
+function inv_scale_problem_gpu!(
+    problem::CuLinearProgrammingProblem,
+    constraint_rescaling::CuVector{Float64},
+    variable_rescaling::CuVector{Float64},
+)
+    # problem = deepcopy(original_problem)
+
+    # Scale objective vector
+    problem.objective_vector .*= variable_rescaling
+    
+    # Scale variable bounds
+    problem.variable_upper_bound ./= variable_rescaling
+    problem.variable_lower_bound ./= variable_rescaling
+    
+    # Scale right hand side
+    problem.right_hand_side .*= constraint_rescaling
+    
+    # Scale constraint matrix
+    inv_rescale_matrix_gpu!(
+        G = problem.constraint_matrix,
+        inv_Dr = CUDA.CuArray(variable_rescaling),
+        inv_DGl = CUDA.CuArray(constraint_rescaling),
+    )
+
+    inv_rescale_matrix_gpu!(
+        G = problem.constraint_matrix_t,
+        inv_Dr = CUDA.CuArray(constraint_rescaling),
+        inv_DGl = CUDA.CuArray(variable_rescaling),
+    )
+    return 
+end
+
+function update_preconditioners!(
+    variable_rescaling::CuVector{Float64},
+    constraint_rescaling::CuVector{Float64},
+    primal_hypergradient::CuVector{Float64},
+    dual_hypergradient::CuVector{Float64},
+    learning_rate::Float64,
+)
+    print(learning_rate)
+    variable_rescaling .+= learning_rate * primal_hypergradient
+    constraint_rescaling .+= learning_rate * dual_hypergradient
+    variable_rescaling .= CUDA.max.(variable_rescaling, 1e-8)
+    constraint_rescaling .= CUDA.max.(constraint_rescaling, 1e-8)
+    return
+end
+
+function rescale_problem_gpu!(
+    scaled_problem::CuScaledQpProblem,
+    hyper_state::CuHyperState,
+    learning_rate::Float64,
+)
+
+    inv_var_rescale = hyper_state.primal_hyperparam
+    inv_con_rescale = hyper_state.dual_hyperparam
+
+    # update inv_var_rescale, inv_con_rescale
+    update_preconditioners!(
+        inv_var_rescale,
+        inv_con_rescale,
+        hyper_state.primal_hypergradient,
+        hyper_state.dual_hypergradient,
+        learning_rate,
+    )
+
+    # Update scaled_problem.scaled_qp.
+    inv_scale_problem_gpu!(
+        scaled_problem.scaled_qp,
+        inv_var_rescale,
+        inv_con_rescale,
+    )
+
+    println("primal_hypergradient", hyper_state.primal_hypergradient)
+    println("dual_hypergradient", hyper_state.dual_hypergradient)
+    println("inv_var_rescale: scale", inv_var_rescale)
+    println("inv_con_rescale: scale", inv_con_rescale)
+
+    # Update scaled_problem.constraint_rescaling and scaled_problem.variable_rescaling.
+    # scaled_problem.constraint_rescaling .= (1.0 ./ inv_con_rescale)
+    # scaled_problem.variable_rescaling .= (1.0 ./ inv_var_rescale)
+
+    scaled_problem.constraint_rescaling ./= inv_con_rescale
+    scaled_problem.variable_rescaling   ./= inv_var_rescale
+    
+    hyper_state.primal_hyperparam    .= 1.0 # inv_var_rescale
+    hyper_state.dual_hyperparam      .= 1.0 # inv_con_rescale
+    hyper_state.primal_hypergradient .= 0.0
+    hyper_state.dual_hypergradient   .= 0.0
+    hyper_state.primal_hypermomentum .= 0.0
+    hyper_state.dual_hypermomentum   .= 0.0
+
+    return 
+end

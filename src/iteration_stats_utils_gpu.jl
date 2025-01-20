@@ -92,7 +92,7 @@ function compute_primal_residual!(
         buffer_kkt.constraint_violation,
     )
 end
-      
+
 """
 Compute primal objective
 """

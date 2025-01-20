@@ -357,6 +357,24 @@ function l2_norm_rescaling(problem::QuadraticProgrammingProblem)
   return row_rescale_factor, column_rescale_factor
 end
 
+function l2_norm_rescaling(problem::CuLinearProgrammingProblem)
+  num_constraints, num_variables = size(problem.constraint_matrix)
+  variable_rescaling = CUDA.ones(Float64, num_variables)
+  constraint_rescaling = CUDA.ones(Float64, num_constraints)
+
+  alpha_norm_col_elementwise(G, 2, variable_rescaling)
+  variable_rescaling .= sqrt.(variable_rescaling)
+  alpha_norm_row(G, 2, constraint_rescaling)
+  constraint_rescaling .= sqrt.(constraint_rescaling)
+
+  constraint_rescaling[iszero.(constraint_rescaling)] .= 1.0
+  variable_rescaling[iszero.(variable_rescaling)] .= 1.0
+  
+  scale_problem(problem, constraint_rescaling, variable_rescaling)
+
+  return constraint_rescaling, variable_rescaling
+end
+
 """
 Uses a modified Ruiz rescaling algorithm to rescale the matrix M=[Q,A';A,0]
 where Q is objective_matrix and A is constraint_matrix, and returns the
@@ -462,6 +480,45 @@ function ruiz_rescaling(
   return cum_constraint_rescaling, cum_variable_rescaling
 end
 
+function ruiz_rescaling(
+  problem::CuLinearProgrammingProblem,
+  num_iterations::Int64,
+  p::Float64 = Inf,
+)
+  num_constraints, num_variables = size(problem.constraint_matrix)
+
+  variable_rescaling = CUDA.ones(Float64, num_variables)
+  constraint_rescaling = CUDA.ones(Float64, num_constraints)
+  cum_variable_rescaling = CUDA.ones(Float64, num_variables)
+  cum_constraint_rescaling = CUDA.ones(Float64, num_constraints)
+
+  for i in 1:num_iterations
+    constraint_matrix = problem.constraint_matrix
+
+    if p == Inf
+      max_abs_col_elementwise(constraint_matrix, variable_rescaling)
+      variable_rescaling .= sqrt.(variable_rescaling)
+    end
+    variable_rescaling[iszero.(variable_rescaling)] .= 1.0
+
+    if num_constraints == 0
+      constraint_rescaling = Float64[]
+    else
+      if p == Inf
+        max_abs_row(constraint_matrix, constraint_rescaling)
+        constraint_rescaling .= sqrt.(constraint_rescaling)
+      end
+      constraint_rescaling[iszero.(constraint_rescaling)] .= 1.0
+    end
+    scale_problem(problem, constraint_rescaling, variable_rescaling)
+
+    cum_constraint_rescaling .*= constraint_rescaling
+    cum_variable_rescaling .*= variable_rescaling
+  end
+
+  return cum_constraint_rescaling, cum_variable_rescaling
+end
+
 """
 Applies the rescaling proposed by Pock and Cambolle (2011),
 "Diagonal preconditioning for first order primal-dual algorithms
@@ -524,6 +581,30 @@ function pock_chambolle_rescaling(
   return constraint_rescaling, variable_rescaling
 end
 
+function pock_chambolle_rescaling(
+  problem::CuLinearProgrammingProblem,
+  alpha::Float64,
+)
+  @assert 0 <= alpha <= 2
+
+  constraint_matrix = problem.constraint_matrix
+  num_constraints, num_variables = size(problem.constraint_matrix)
+  variable_rescaling = CUDA.ones(Float64, num_variables)
+  constraint_rescaling = CUDA.ones(Float64, num_constraints)
+
+  alpha_norm_col_elementwise(constraint_matrix, 2 - alpha, variable_rescaling)
+  variable_rescaling .= sqrt.(variable_rescaling)
+  alpha_norm_row(constraint_matrix, alpha, constraint_rescaling)
+  constraint_rescaling .= sqrt.(constraint_rescaling)     
+
+  constraint_rescaling[iszero.(constraint_rescaling)] .= 1.0
+  variable_rescaling[iszero.(variable_rescaling)] .= 1.0
+
+  scale_problem(problem, constraint_rescaling, variable_rescaling)
+
+  return constraint_rescaling, variable_rescaling
+end
+
 """
 Rescales `problem` in place. If we let `D = diag(cum_variable_rescaling)` and
 `E = diag(cum_constraint_rescaling)`, then `problem` is modified such that:
@@ -557,6 +638,30 @@ function scale_problem(
     sparse(Diagonal(1 ./ constraint_rescaling)) *
     problem.constraint_matrix *
     sparse(Diagonal(1 ./ variable_rescaling))
+  return
+end
+
+function scale_problem(
+  problem::CuLinearProgrammingProblem,
+  constraint_rescaling::CuVector{Float64},
+  variable_rescaling::CuVector{Float64},
+)
+  @assert all(t -> t > 0, constraint_rescaling)
+  @assert all(t -> t > 0, variable_rescaling)
+  problem.objective_vector ./= variable_rescaling
+  problem.variable_upper_bound .*= variable_rescaling
+  problem.variable_lower_bound .*= variable_rescaling
+  problem.right_hand_side ./= constraint_rescaling
+  rescale_matrix_gpu!(
+    G = problem.constraint_matrix,
+    Dr = variable_rescaling,
+    DGl = constraint_rescaling,
+  )
+  rescale_matrix_gpu!(
+    G = problem.constraint_matrix_t,
+    Dr = constraint_rescaling,
+    DGl = variable_rescaling,
+  )
   return
 end
 
@@ -632,7 +737,7 @@ function rescale_problem(
   num_constraints, num_variables = size(problem.constraint_matrix)
   constraint_rescaling = ones(num_constraints)
   variable_rescaling = ones(num_variables)
-
+  
   if l_inf_ruiz_iterations > 0
     con_rescale, var_rescale =
       ruiz_rescaling(problem, l_inf_ruiz_iterations, Inf)
@@ -668,6 +773,69 @@ function rescale_problem(
       print("(Ruiz iterations = $l_inf_ruiz_iterations, ")
       println("l2_norm_rescaling = $l2_norm_rescaling_flag):")
       print_problem_details(scaled_problem.scaled_qp)
+    end
+  end
+
+  return scaled_problem
+end
+
+function rescale_problem(
+  l_inf_ruiz_iterations::Int,
+  l2_norm_rescaling_flag::Bool,
+  pock_chambolle_alpha::Union{Float64,Nothing},
+  verbosity::Int64,
+  original_problem::CuLinearProgrammingProblem,
+)
+  problem = deepcopy(original_problem)
+
+  num_constraints, num_variables = size(problem.constraint_matrix)
+  variable_rescaling = CUDA.ones(Float64, num_variables)
+  constraint_rescaling = CUDA.ones(Float64, num_constraints)
+
+  if l_inf_ruiz_iterations > 0
+    con_rescale, var_rescale =
+      ruiz_rescaling(problem, l_inf_ruiz_iterations, Inf)
+    constraint_rescaling .*= con_rescale
+    variable_rescaling .*= var_rescale
+  end
+
+  if l2_norm_rescaling_flag
+    con_rescale, var_rescale = l2_norm_rescaling(problem)
+    constraint_rescaling .*= con_rescale
+    variable_rescaling .*= var_rescale
+  end
+
+  if !isnothing(pock_chambolle_alpha)
+    con_rescale, var_rescale =
+      pock_chambolle_rescaling(problem, pock_chambolle_alpha)
+    constraint_rescaling .*= con_rescale
+    variable_rescaling .*= var_rescale
+  end
+
+  # problem.objective_vector .= CUDA.CuVector(problem.objective_vector)
+  # problem.constraint_matrix .= CUDA.CUSPARSE.CuSparseMatrixCSR(problem.constraint_matrix)
+  # problem.constraint_matrix_t .= CUDA.CUSPARSE.CuSparseMatrixCSR(problem.constraint_matrix_t)
+  # problem.right_hand_side .= CUDA.CuVector(problem.right_hand_side)
+  # problem.variable_lower_bound .= CUDA.CuVector(problem.variable_lower_bound)
+  # problem.variable_upper_bound .= CUDA.CuVector(problem.variable_upper_bound)
+  # constraint_rescaling .= CUDA.CuVector(constraint_rescaling)
+  # variable_rescaling .= CUDA.CuVector(variable_rescaling)
+
+  scaled_problem = CuScaledQpProblem(
+    original_problem,
+    problem,
+    constraint_rescaling,
+    variable_rescaling,
+  )
+
+  if verbosity >= 3
+    if l_inf_ruiz_iterations == 0 && !l2_norm_rescaling_flag
+      println("No rescaling.")
+    else
+      print("Problem after rescaling ")
+      print("(Ruiz iterations = $l_inf_ruiz_iterations, ")
+      println("l2_norm_rescaling = $l2_norm_rescaling_flag):")
+      # print_problem_details(scaled_problem.scaled_qp)
     end
   end
 

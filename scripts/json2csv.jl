@@ -52,10 +52,10 @@ end
 
 function main()
     json_dirs = [
-        "output/solver_output/netlib/basicPDLP_time_180.0_tol_0.0001_lr_0.0",
-        "output/solver_output/netlib/adaPDLP_time_180.0_tol_0.0001_lr_0.0",
-        "output/solver_output/netlib/osPDLP_time_180.0_tol_0.0001_lr_0.01",
-        "output/solver_output/netlib/osPDLP_time_180.0_tol_0.0001_lr_0.001",
+        "output/solver_output/MIPLIB2017/hyperPDLP_time_600.0_tol_0.0001_lr_0.0",
+        "output/solver_output/MIPLIB2017/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
+        "output/solver_output/MIPLIB2017/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-6",
+        "output/solver_output/MIPLIB2017/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-7",
     ]
     for json_dir in json_dirs
         write_table(json_dir)
