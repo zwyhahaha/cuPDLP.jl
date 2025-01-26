@@ -121,6 +121,7 @@ function warm_up(lp::cuPDLP.QuadraticProgrammingProblem)
         cuPDLP.AdaptiveStepsizeParams(0.3,0.6), # adaptive stepsize parameters (reduction, growth exponent)
         false, # online scaling
         0., # online learning rate
+        1, # online scaling frequency
         true,
     )
 
@@ -166,6 +167,11 @@ function parse_command_line()
         arg_type = Float64
         default = 0.001
 
+        "--online_scaling_frequency"
+        help = "Frequency of online scaling."
+        arg_type = Int
+        default = 1
+
         "--normalize"
         help = "Normalize the hypergradient."
         arg_type = Bool
@@ -206,6 +212,7 @@ function run_instance(instance_path, args)
     tolerance = args["tolerance"]
     time_sec_limit = args["time_sec_limit"]
     learning_rate = args["learning_rate"]
+    online_scaling_frequency = args["online_scaling_frequency"]
     normalize = args["normalize"]
 
     if experiment_name == "adaPDLP"
@@ -217,7 +224,7 @@ function run_instance(instance_path, args)
         error("Invalid experiment name")
     end
     
-    if experiment_name == "nonhyperPDLP"
+    if occursin("non", experiment_name)
         normalize = false
     end
     
@@ -278,6 +285,7 @@ function run_instance(instance_path, args)
         step_size_policy_params,
         online_scaling,
         learning_rate,
+        online_scaling_frequency,
         normalize,
     )
     

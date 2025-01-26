@@ -23,6 +23,7 @@ struct PdhgParameters
     }
     online_scaling::Bool
     learning_rate::Float64
+    online_scaling_frequency::Int64
     normalize::Bool
 end
 
@@ -1057,7 +1058,8 @@ function optimize(
         end
         
         # doing PDHG step
-        if params.online_scaling
+        if params.online_scaling > 0.0
+            solver_state.online_scaling = (mod(iteration, params.online_scaling_frequency) == 0)
             take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state, hyper_state)
         else
             take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state, nothing)

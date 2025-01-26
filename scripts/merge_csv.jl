@@ -153,7 +153,7 @@ ada_file = "output/table/$(dataset)/adaPDLP_time_$(time_limit)_tol_$(tolerance)_
 # basic_file = "output/table/$(dataset)/basicPDLP_time_$(time_limit)_tol_$(tolerance)_lr_0.0.csv"
 ada_df = CSV.read(ada_file, DataFrame)
 # basic_df = CSV.read(basic_file, DataFrame)
-os_df = merge_os_dfs("nonPDLP",dataset, time_limit, tolerance)
-ifos_df = merge_os_dfs("hyperPDLP",dataset, time_limit, tolerance)
+os_df = merge_os_dfs("xPDLP",dataset, time_limit, tolerance)
+ifos_df = merge_os_dfs("if20hyperPDLP",dataset, time_limit, tolerance)
 df_merged = merge_table(os_df, ada_df, ifos_df)
-CSV.write("output/table/$(dataset)/nonhyper_merged_time_$(time_limit)_tol_$(tolerance).csv", df_merged)
+CSV.write("output/table/$(dataset)/ifx_merged_time_$(time_limit)_tol_$(tolerance).csv", df_merged)
