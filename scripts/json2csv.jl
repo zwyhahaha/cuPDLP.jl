@@ -16,28 +16,32 @@ function write_table(json_dir)
         for json_file in json_files
             json_file = joinpath(json_dir, subdir, json_file)
             if isfile(json_file)
-                json_string = read(json_file, String)
-                data = JSON.parse(json_string)
-                if !isa(data, Dict)
-                    error("Expected a dictionary at the top level of the JSON file")
+                try
+                    json_string = read(json_file, String)
+                    data = JSON.parse(json_string)
+                    if !isa(data, Dict)
+                        error("Expected a dictionary at the top level of the JSON file")
+                    end
+
+                    solution_stats = get(data, "solution_stats", Dict())
+                    cumulative_kkt_matrix_passes = get(solution_stats, "cumulative_kkt_matrix_passes", missing)
+                    cumulative_time_sec = get(solution_stats, "cumulative_time_sec", missing)
+                    method_specific_stats = get(solution_stats, "method_specific_stats", Dict())
+                    time_spent_doing_basic_algorithm = get(method_specific_stats, "time_spent_doing_basic_algorithm", missing)
+
+                    row = Dict(
+                        "instance_name" => subdir,
+                        "termination_string" => get(data, "termination_string", missing),
+                        "iteration_count" => get(data, "iteration_count", missing),
+                        "solve_time_sec" => get(data, "solve_time_sec", missing),
+                        "cumulative_kkt_matrix_passes" => cumulative_kkt_matrix_passes,
+                        "cumulative_time_sec" => cumulative_time_sec,
+                        "time_spent_doing_basic_algorithm" => time_spent_doing_basic_algorithm
+                    )
+                    push!(rows, row)
+                catch e
+                    println("Error reading $json_file: $e")
                 end
-
-                solution_stats = get(data, "solution_stats", Dict())
-                cumulative_kkt_matrix_passes = get(solution_stats, "cumulative_kkt_matrix_passes", missing)
-                cumulative_time_sec = get(solution_stats, "cumulative_time_sec", missing)
-                method_specific_stats = get(solution_stats, "method_specific_stats", Dict())
-                time_spent_doing_basic_algorithm = get(method_specific_stats, "time_spent_doing_basic_algorithm", missing)
-
-                row = Dict(
-                    "instance_name" => subdir,
-                    "termination_string" => get(data, "termination_string", missing),
-                    "iteration_count" => get(data, "iteration_count", missing),
-                    "solve_time_sec" => get(data, "solve_time_sec", missing),
-                    "cumulative_kkt_matrix_passes" => cumulative_kkt_matrix_passes,
-                    "cumulative_time_sec" => cumulative_time_sec,
-                    "time_spent_doing_basic_algorithm" => time_spent_doing_basic_algorithm
-                )
-                push!(rows, row)
             end
         end
     end
@@ -52,10 +56,17 @@ end
 
 function main()
     json_dirs = [
-        "output/solver_output/MIPLIB2017/hyperPDLP_time_600.0_tol_0.0001_lr_0.0",
-        "output/solver_output/MIPLIB2017/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
-        "output/solver_output/MIPLIB2017/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-6",
-        "output/solver_output/MIPLIB2017/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-7",
+        "output/solver_output/MIPLIB383/hyperPDLP_time_600.0_tol_0.0001_lr_0.0001",
+        "output/solver_output/MIPLIB383/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
+        "output/solver_output/MIPLIB383/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-6",
+        "output/solver_output/MIPLIB383/if20hyperPDLP_time_600.0_tol_0.0001_lr_0.0001",
+        "output/solver_output/MIPLIB383/if20hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
+        "output/solver_output/MIPLIB383/if20hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-6",
+        "output/solver_output/MIPLIB383/if20nonhyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
+        "output/solver_output/MIPLIB383/nonhyperPDLP_time_600.0_tol_0.0001_lr_0.0001",
+        "output/solver_output/MIPLIB383/nonhyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
+        "output/solver_output/MIPLIB383/nonhyperPDLP_time_600.0_tol_0.0001_lr_1.0e-6",
+        "output/solver_output/MIPLIB383/nonhyperPDLP_time_600.0_tol_0.0001_lr_1.0e-7",
     ]
     for json_dir in json_dirs
         write_table(json_dir)

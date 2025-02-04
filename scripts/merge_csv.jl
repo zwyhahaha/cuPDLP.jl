@@ -3,6 +3,30 @@ using ArgParse
 using CSV
 using DataFrames
 
+function merge_table_general(df_list,name_list)
+    for i in eachindex(df_list)
+        result_dict  = Dict(
+            "termination_string" => "termination_string_$(name_list[i])",
+            "iteration_count" => "iteration_count_$(name_list[i])",
+            "solve_time_sec" => "solve_time_sec_$(name_list[i])",
+            "cumulative_kkt_matrix_passes" => "cumulative_kkt_matrix_passes_$(name_list[i])",
+            "cumulative_time_sec" => "cumulative_time_sec_$(name_list[i])",
+            "time_spent_doing_basic_algorithm" => "time_spent_doing_basic_algorithm_$(name_list[i])"
+        )
+        if "learning_rate" in names(df_list[i])
+            result_dict["learning_rate"] = "learning_rate_$(name_list[i])"
+        end
+        rename!(df_list[i], result_dict)
+    end
+    merged_df = outerjoin(df_list..., on=:instance_name, makeunique=true)
+    column_names = names(merged_df)
+    selected_columns = filter(name -> startswith(name, "termination_string") || startswith(name, "iteration_count") || startswith(name, "solve_time_sec") || startswith(name, "learning_rate"), column_names)
+    selected_columns = sort(selected_columns)
+    selected_columns = ["instance_name"; selected_columns]
+    merged_df = merged_df[:, selected_columns]
+    return merged_df
+end
+
 function merge_table(os_df, ada_df, ifos_df)
     rename!(ada_df, Dict(
         "termination_string" => "termination_string_adaPDLP",
@@ -56,11 +80,10 @@ end
 function merge_os_dfs(experiment::String, dataset::String, time_limit::Float64, tolerance::Float64)
     dir_path = "output/table/$(dataset)"
     pattern  = "$(experiment)_time_$(time_limit)_tol_$(tolerance)"
-    files    = filter(f -> occursin(pattern, f), readdir(dir_path))
+    files = filter(f -> startswith(f, pattern), readdir(dir_path))
 
     dfs = DataFrame[]
     for file in files
-        # lr_match = match(r"lr_([\d\.]+)\.csv", file)
         lr_match = match(r"lr_([\d\.eE+-]+)\.csv", file)
         lr_val   = (lr_match === nothing) ? missing : parse(Float64, lr_match.captures[1])
         df       = CSV.read(joinpath(dir_path, file), DataFrame; stringtype=String)
@@ -72,36 +95,8 @@ function merge_os_dfs(experiment::String, dataset::String, time_limit::Float64, 
         return DataFrame()
     end
 
-    # merged_df = dfs[1]
-    # for i in 2:length(dfs)
-    #     df = dfs[i]
-    #     for row in eachrow(df)
-    #         instance_name = row[:instance_name]
-    #         idx = findfirst(isequal(instance_name), merged_df[!, :instance_name])
-    #         if idx !== nothing
-    #             if row[:iteration_count] < merged_df[idx, :iteration_count]
-    #                 common_cols = intersect(names(merged_df), names(row))
-    #                 for col in common_cols
-    #                     merged_df[idx, col] = row[col]
-    #                     # if typeof(row[col]) == String && length(row[col]) > 15
-    #                     #     merged_df[idx, col] = row[col][1:15]
-    #                     # else
-    #                     #     merged_df[idx, col] = row[col]
-    #                     # end
-    #                 end
-    #             end
-    #         else
-    #             # for col in names(row)
-    #             #     if typeof(row[col]) == String && length(row[col]) > 15
-    #             #         row[col] = row[col][1:15]
-    #             #     end
-    #             # end
-    #             push!(merged_df, row)
-    #         end
-    #     end
-    # end
-    merged_df = dfs[1]
-    for i in 2:length(dfs)
+    merged_df = dfs[length(dfs)]
+    for i in 1:length(dfs)-1
         df = dfs[i]
         for row in eachrow(df)
             instance_name = row[:instance_name]
@@ -150,10 +145,10 @@ time_limit = args["time_sec_limit"]
 tolerance = args["tolerance"]
 
 ada_file = "output/table/$(dataset)/adaPDLP_time_$(time_limit)_tol_$(tolerance)_lr_0.0.csv"
-# basic_file = "output/table/$(dataset)/basicPDLP_time_$(time_limit)_tol_$(tolerance)_lr_0.0.csv"
 ada_df = CSV.read(ada_file, DataFrame)
-# basic_df = CSV.read(basic_file, DataFrame)
-os_df = merge_os_dfs("xPDLP",dataset, time_limit, tolerance)
-ifos_df = merge_os_dfs("if20hyperPDLP",dataset, time_limit, tolerance)
-df_merged = merge_table(os_df, ada_df, ifos_df)
-CSV.write("output/table/$(dataset)/ifx_merged_time_$(time_limit)_tol_$(tolerance).csv", df_merged)
+os_df = merge_os_dfs("hyperPDLP",dataset, time_limit, tolerance)
+osnon_df = merge_os_dfs("nonhyperPDLP",dataset, time_limit, tolerance)
+if20_df = merge_os_dfs("if20hyperPDLP",dataset, time_limit, tolerance)
+if20non_df = merge_os_dfs("if20nonhyperPDLP",dataset, time_limit, tolerance)
+df_merged = merge_table_general([ada_df, os_df, osnon_df, if20_df, if20non_df], ["ada", "os", "nonos", "if20", "if20non"])
+CSV.write("output/table/$(dataset)/merged_time_$(time_limit)_tol_$(tolerance).csv", df_merged)

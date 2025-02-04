@@ -216,7 +216,7 @@ function run_instance(instance_path, args)
     normalize = args["normalize"]
 
     if experiment_name == "adaPDLP"
-        online_scaling = false
+        online_scaling = true
         learning_rate = 0.0
     elseif occursin("hyperPDLP", experiment_name)
         online_scaling = true
@@ -235,8 +235,10 @@ function run_instance(instance_path, args)
     if !isdir(output_directory)
         mkpath(output_directory)
     else
-        println("Skip instance: ", instance_name)
-        return
+        if length(readdir(output_directory)) > 0
+            println("Skip instance: ", instance_name)
+            return
+        end
     end
 
     # lp = cuPDLP.qps_reader_to_standard_form(instance_path)
