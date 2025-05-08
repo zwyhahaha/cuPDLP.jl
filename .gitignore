@@ -1,8 +1,4 @@
-output
+output/
 .vscode
 note.md
-data
-scripts/json2csv.py
-preconditioner
-run.sh
-scripts/merge_csv.jl
+data/

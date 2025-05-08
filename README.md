@@ -9,7 +9,7 @@ Part of the code utilizes https://github.com/google-research/FirstOrderLp.jl whi
 A one-time step is required to set up the necessary packages on the local machine:
 
 ```shell
-$ julia --project -e 'import Pkg; Pkg.instantiate()'
+$ ~/julia-1.10/bin/julia --project -e 'import Pkg; Pkg.instantiate()'
 ```
 
 ## Running 
@@ -20,10 +20,6 @@ $ julia --project -e 'import Pkg; Pkg.instantiate()'
 $ julia --project scripts/solve.jl \
 --instance_path=INSTANCE_PATH --output_directory=OUTPUT_DIRECTORY \
 --tolerance=TOLERANCE --time_sec_limit=TIME_SEC_LIMIT
-```
-
-```shell
-julia --project scripts/solve.jl --instance_name=adlittle --dataset=netlib --output_directory=output --tolerance=1e-4 --time_sec_limit=60
 ```
 
 ## Interpreting the output

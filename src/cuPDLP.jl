@@ -33,8 +33,6 @@ const sample = StatsBase.sample
 
 const ThreadPerBlock = 256
 
-include("/home/shanshu/opt/cuPDLP.jl/preconditioner/test_preconditioner.jl")
-
 include("quadratic_programming.jl")
 include("solve_log.jl")
 include("quadratic_programming_io.jl")
@@ -43,12 +41,9 @@ include("cpu_to_gpu.jl")
 include("termination.jl")
 include("iteration_stats_utils_gpu.jl")
 include("saddle_point_gpu.jl")
-# include("solve_gpu_plus.jl")
-include("adaptive_os_pdhg.jl")
-# include("adaptive_ifos_pdhg.jl")
 
+
+include("adaptive_pdhg.jl")
 # include("primal_dual_hybrid_gradient_gpu.jl")
-# include("solve_gpu.jl")
-
 
 end # module cuPDLP

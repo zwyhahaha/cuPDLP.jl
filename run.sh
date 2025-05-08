@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=2 ~/julia-1.10/bin/julia --project scripts/solve.jl --instance_name all --dataset netlib --experiment_name adaPDLP --tolerance 1e-4 --time_sec_limit=3600

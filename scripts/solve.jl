@@ -2,8 +2,12 @@ import ArgParse
 import GZip
 import JSON3
 import JSON
+import CSV
+import DataFrames
 
-import cuPDLP
+include("../src/cuPDLP.jl")
+include("json2csv.jl")
+
 
 function write_vector_to_file(filename, vector)
     open(filename, "w") do io
@@ -114,10 +118,11 @@ function warm_up(lp::cuPDLP.QuadraticProgrammingProblem)
         64, # termination evaluation frequency
         termination_params_warmup,
         restart_params,
-        cuPDLP.ConstantStepsizeParams(), # adaptive stepsize parameters (reduction, growth exponent)
-        true, # online scaling
-        0.1, # online learning rate
-        false, # adaptive primal weight
+        cuPDLP.AdaptiveStepsizeParams(0.3,0.6), # adaptive stepsize parameters (reduction, growth exponent)
+        false, # online scaling
+        0., # online learning rate
+        1, # online scaling frequency
+        true,
     )
 
     cuPDLP.optimize(params_warmup, lp);
@@ -131,17 +136,21 @@ function parse_command_line()
         "--instance_name"
         help = "The name of the instance to solve in .mps.gz or .mps format."
         arg_type = String
-        required = true
+        default = "fit1d"
+        # required = true
+
 
         "--dataset"
         help = "dataset name"
         arg_type = String
-        required = true
+        default = "netlib"
+        # required = true
 
         "--experiment_name"
         help = "experiment name."
         arg_type = String
-        required = true
+        default = "hyperPDLP"
+        # required = true
 
         "--tolerance"
         help = "KKT tolerance of the solution."
@@ -156,7 +165,17 @@ function parse_command_line()
         "--learning_rate"
         help = "Learning rate for online scaling."
         arg_type = Float64
-        default = 0.0
+        default = 0.001
+
+        "--online_scaling_frequency"
+        help = "Frequency of online scaling."
+        arg_type = Int
+        default = 1
+
+        "--normalize"
+        help = "Normalize the hypergradient."
+        arg_type = Bool
+        default = true
     end
 
     return ArgParse.parse_args(arg_parse)
@@ -173,7 +192,7 @@ function get_iteration_from_json(json_file)
     end
 end
 
-function get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
+function get_ada_iteration(dataset, instance_name, time_sec_limit, tolerance)
     experiment_name = "adaPDLP_time_$(time_sec_limit)_tol_$(tolerance)_lr_0.0"
     ada_directory = joinpath("output/solver_output", dataset, experiment_name, instance_name)
     if !isdir(ada_directory)
@@ -184,66 +203,52 @@ function get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
         ada_iter = get_iteration_from_json(ada_json_file)
     end
 
-    experiment_name = "basicPDLP_time_$(time_sec_limit)_tol_$(tolerance)_lr_0.0"
-    basic_directory = joinpath("output/solver_output", dataset, experiment_name, instance_name)
-    if !isdir(basic_directory)
-        basic_iter =  typemax(Int32)
-    else
-        basic_json_file = filter(x -> endswith(x, ".json"), readdir(basic_directory))
-        basic_json_file = joinpath(basic_directory, basic_json_file[1])
-        basic_iter = get_iteration_from_json(basic_json_file)
-    end
-
-    return min(min(ada_iter, basic_iter) * 5, typemax(Int32))
+    return ada_iter
 end
 
-function main()
-    parsed_args = parse_command_line()
-    instance_name = parsed_args["instance_name"]
-    dataset = parsed_args["dataset"]
-    experiment_name = parsed_args["experiment_name"]
-    tolerance = parsed_args["tolerance"]
-    time_sec_limit = parsed_args["time_sec_limit"]
-    learning_rate = parsed_args["learning_rate"]
+function run_instance(instance_path, args)
+    dataset = args["dataset"]
+    experiment_name = args["experiment_name"]
+    tolerance = args["tolerance"]
+    time_sec_limit = args["time_sec_limit"]
+    learning_rate = args["learning_rate"]
+    online_scaling_frequency = args["online_scaling_frequency"]
+    normalize = args["normalize"]
 
     if experiment_name == "adaPDLP"
-        adaptive_step_size = true
-        adaptive_primal_weight = true
-        online_scaling = false
-        learning_rate = 0.0
-        iteration_limit = typemax(Int32)
-    elseif experiment_name == "osPDLP"
-        adaptive_step_size = false
-        adaptive_primal_weight = false
         online_scaling = true
-        iteration_limit = get_iteration_limit(dataset, instance_name, time_sec_limit, tolerance)
-    elseif experiment_name == "basicPDLP"
-        adaptive_step_size = false
-        adaptive_primal_weight = false
-        online_scaling = false
         learning_rate = 0.0
-        iteration_limit = typemax(Int32)
+    elseif occursin("hyperPDLP", experiment_name)
+        online_scaling = true
     else
-        error("Unknown experiment name: ", experiment_name)
+        error("Invalid experiment name")
     end
-
+    
+    if occursin("non", experiment_name)
+        normalize = false
+    end
+    
     experiment_name = "$(experiment_name)_time_$(time_sec_limit)_tol_$(tolerance)_lr_$(learning_rate)"
-
-    instance_path = joinpath("data", dataset, "$(instance_name).mps.gz")
+    instance_name = replace(basename(instance_path), r"\.(mps|MPS|qps|QPS)(\.gz)?$" => "")
 
     output_directory = joinpath("output/solver_output", dataset, experiment_name,instance_name)
     if !isdir(output_directory)
         mkpath(output_directory)
+    else
+        if length(readdir(output_directory)) > 0
+            println("Skip instance: ", instance_name)
+            return
+        end
     end
 
-    lp = cuPDLP.qps_reader_to_standard_form(instance_path)
+    # lp = cuPDLP.qps_reader_to_standard_form(instance_path)
 
-    println("warm up start")
-    oldstd = stdout
-    redirect_stdout(devnull) # suppress output
-    warm_up(lp); # solve the LP for 100 iterations
-    redirect_stdout(oldstd)
-    println("warm up end")
+    # println("warm up start")
+    # oldstd = stdout
+    # redirect_stdout(devnull) # suppress output
+    # warm_up(lp); # solve the LP for 100 iterations
+    # redirect_stdout(oldstd)
+    # println("warm up end")
 
     restart_params = cuPDLP.construct_restart_parameters(
         cuPDLP.ADAPTIVE_KKT,    # NO_RESTARTS FIXED_FREQUENCY ADAPTIVE_KKT
@@ -262,15 +267,11 @@ function main()
         eps_primal_infeasible = 1.0e-8,
         eps_dual_infeasible = 1.0e-8,
         time_sec_limit = time_sec_limit,
-        iteration_limit = iteration_limit,
+        iteration_limit = 1e6,
         kkt_matrix_pass_limit = Inf,
     )
 
-    if adaptive_step_size
-        step_size_policy_params = cuPDLP.AdaptiveStepsizeParams(0.3,0.6)
-    else
-        step_size_policy_params = cuPDLP.ConstantStepsizeParams()
-    end
+    step_size_policy_params = cuPDLP.AdaptiveStepsizeParams(0.3,0.6)
 
     params = cuPDLP.PdhgParameters(
         10, # ruiz scaling iterations
@@ -278,7 +279,7 @@ function main()
         1.0, # Pock scaling coefficient: l1 norm
         1.0, # primal importance, control initial primal weight
         true, # scale initial primal weight
-        2,# verbosity
+        3,# verbosity
         true, # record iteration stats
         64, # termination evaluation frequency
         termination_params,
@@ -286,7 +287,8 @@ function main()
         step_size_policy_params,
         online_scaling,
         learning_rate,
-        adaptive_primal_weight,
+        online_scaling_frequency,
+        normalize,
     )
     
     solve_instance_and_output(
@@ -294,6 +296,46 @@ function main()
         output_directory,
         instance_path,
     )
+end
+
+function main()
+    parsed_args = parse_command_line()
+    instance_name = parsed_args["instance_name"]
+    dataset = parsed_args["dataset"]
+    experiment_name = parsed_args["experiment_name"]
+    tolerance = parsed_args["tolerance"]
+    time_sec_limit = parsed_args["time_sec_limit"]
+    learning_rate = parsed_args["learning_rate"]
+    experiment_name = "$(experiment_name)_time_$(time_sec_limit)_tol_$(tolerance)_lr_$(learning_rate)"
+
+    if instance_name != "all"
+        instance_path = joinpath("data", dataset, "$(instance_name).mps.gz")
+        run_instance(instance_path, parsed_args)
+    else
+        problem_folder = joinpath("data", dataset)
+        all_instances = readdir(problem_folder)
+        len = length(all_instances)
+
+        hard_instances = ["bnl1","bore3d","fffff800","greenbea","greenbeb","perold","pilot.ja","pilot4"]
+
+        for i in 1:len
+            instance_path = joinpath(problem_folder, all_instances[i])
+            try
+                instance_name = replace(basename(instance_path), r"\.(mps|MPS|qps|QPS)(\.gz)?$" => "")
+                # ada_iter = get_ada_iteration(dataset, instance_name, time_sec_limit, tolerance)
+                if instance_name in hard_instances
+                    println("Skip instance: ", i, instance_name)
+                    continue
+                end
+                run_instance(instance_path, parsed_args)
+            catch e
+                println("Error in instance: ", i, instance_path)
+                println(e)
+                continue
+            end
+        end
+        write_table(joinpath("output/solver_output", dataset, experiment_name))
+    end
 
 end
 
