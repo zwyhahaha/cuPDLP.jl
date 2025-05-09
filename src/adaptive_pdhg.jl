@@ -509,7 +509,6 @@ function update_primal_hyper_state_kernel!(
             else
                 primal_hypergradient[tx] = primal_step_size * (objective_vector[tx] - current_dual_product[tx] + delta_dual_product[tx]) * (objective_vector[tx] - current_dual_product[tx] + delta_dual_product[tx]) / (primal_norm_squared + eps())
             end
-            # primal_hypergradient[tx] = primal_step_size * (objective_vector[tx] - current_dual_product[tx] + delta_dual_product[tx]) * (objective_vector[tx] - current_dual_product[tx] + delta_dual_product[tx]) / (primal_norm_squared + eps())
             primal_hypermomentum[tx] += primal_hypergradient[tx] * primal_hypergradient[tx]
             primal_hyperparam[tx] += learning_rate * primal_hypergradient[tx] / sqrt(primal_hypermomentum[tx] + eps())
         end
@@ -578,7 +577,6 @@ function update_dual_hyper_state_kernel!(
             else
                 dual_hypergradient[tx] = dual_step_size * (right_hand_side[tx] - current_primal_product[tx]) * (right_hand_side[tx] - delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx]) / (dual_norm_squared + eps())
             end
-            # dual_hypergradient[tx] = dual_step_size * (right_hand_side[tx] - current_primal_product[tx]) * (right_hand_side[tx] - delta_primal_product[tx] - extrapolation_coefficient * current_primal_product[tx]) / (dual_norm_squared + eps())
             dual_hypermomentum[tx] += dual_hypergradient[tx] * dual_hypergradient[tx]
             dual_hyperparam[tx] += learning_rate * dual_hypergradient[tx] / sqrt(dual_hypermomentum[tx] + eps())
         end
@@ -677,7 +675,7 @@ function compute_norms(
     current_primal_product::CuVector{Float64},
 )
     primal_norm_squared = CUDA.norm(objective_vector .- current_dual_product)^2
-    dual_norm_squared = CUDA.norm(right_hand_side .- current_primal_product)^2
+    dual_norm_squared   = CUDA.norm(right_hand_side .- current_primal_product)^2
     return primal_norm_squared, dual_norm_squared
 end
 
@@ -695,13 +693,6 @@ function optimize(
 
     start_rescaling_time = time()
     Printf.@printf("Rescaling problem...\n")
-    # d_scaled_problem = rescale_problem(
-    #     params.l_inf_ruiz_iterations,
-    #     params.l2_norm_rescaling,
-    #     params.pock_chambolle_alpha,
-    #     params.verbosity,
-    #     buffer_lp,
-    # )
 
     scaled_problem = rescale_problem(
         params.l_inf_ruiz_iterations,
@@ -1058,12 +1049,8 @@ function optimize(
         end
         
         # doing PDHG step
-        if params.online_scaling > 0.0
-            solver_state.online_scaling = (mod(iteration, params.online_scaling_frequency) == 0)
-            take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state, hyper_state)
-        else
-            take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state, nothing)
-        end
+        solver_state.online_scaling = (mod(iteration, params.online_scaling_frequency) == 0)
+        take_step!(params.step_size_policy_params, d_problem, solver_state, buffer_state, hyper_state)
 
         time_spent_doing_basic_algorithm += time() - time_spent_doing_basic_algorithm_checkpoint
     end

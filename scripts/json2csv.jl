@@ -2,10 +2,21 @@ import ArgParse
 import JSON
 import CSV
 import DataFrames
+
 """
-write instance_name, termination_string, iteration_count, solve_time_sec,
-cumulative_kkt_matrix_passes, cumulative_time_sec, method_specific_stats["time_spent_doing_basic_algorithm"]
-output/solver_output/MIPLIB/adaPDLP_time_60.0_tol_0.0001_lr_0.0/acc-tight2/acc-tight2_summary.json
+Synthesize the JSON output to a CSV file.
+
+This function reads JSON files from `output/solver_output` and its subdirectories,
+extracts result data, and writes it to a CSV file.
+
+The CSV file will contain the following columns:
+- instance_name
+- termination_string
+- iteration_count
+- solve_time_sec
+- cumulative_kkt_matrix_passes
+- cumulative_time_sec
+- time_spent_doing_basic_algorithm
 """
 function write_table(json_dir)
     csv_file = replace(json_dir, "solver_output" => "table")
@@ -46,27 +57,20 @@ function write_table(json_dir)
         end
     end
     
-    # CSV.write(csv_file, rows)
     df = DataFrames.DataFrame(rows)
     column_order = ["instance_name", "termination_string", "iteration_count", "solve_time_sec", "cumulative_kkt_matrix_passes", "cumulative_time_sec", "time_spent_doing_basic_algorithm"]
     df = df[:, column_order]
 
+    csv_dir = dirname(csv_file)
+    if !isdir(csv_dir)
+        mkpath(csv_dir)
+    end
     CSV.write(csv_file, df)
 end
 
 function main()
     json_dirs = [
-        "output/solver_output/MIPLIB383/hyperPDLP_time_600.0_tol_0.0001_lr_0.0001",
-        "output/solver_output/MIPLIB383/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
-        "output/solver_output/MIPLIB383/hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-6",
-        "output/solver_output/MIPLIB383/if20hyperPDLP_time_600.0_tol_0.0001_lr_0.0001",
-        "output/solver_output/MIPLIB383/if20hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
-        "output/solver_output/MIPLIB383/if20hyperPDLP_time_600.0_tol_0.0001_lr_1.0e-6",
-        "output/solver_output/MIPLIB383/if20nonhyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
-        "output/solver_output/MIPLIB383/nonhyperPDLP_time_600.0_tol_0.0001_lr_0.0001",
-        "output/solver_output/MIPLIB383/nonhyperPDLP_time_600.0_tol_0.0001_lr_1.0e-5",
-        "output/solver_output/MIPLIB383/nonhyperPDLP_time_600.0_tol_0.0001_lr_1.0e-6",
-        "output/solver_output/MIPLIB383/nonhyperPDLP_time_600.0_tol_0.0001_lr_1.0e-7",
+        "output/solver_output/netlib/adaPDLP_time_3600.0_tol_0.0001_lr_0.0",
     ]
     for json_dir in json_dirs
         write_table(json_dir)

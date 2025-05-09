@@ -41,9 +41,6 @@ include("cpu_to_gpu.jl")
 include("termination.jl")
 include("iteration_stats_utils_gpu.jl")
 include("saddle_point_gpu.jl")
-
-
 include("adaptive_pdhg.jl")
-# include("primal_dual_hybrid_gradient_gpu.jl")
 
 end # module cuPDLP

@@ -119,7 +119,7 @@ function warm_up(lp::cuPDLP.QuadraticProgrammingProblem)
         termination_params_warmup,
         restart_params,
         cuPDLP.AdaptiveStepsizeParams(0.3,0.6), # adaptive stepsize parameters (reduction, growth exponent)
-        false, # online scaling
+        true, # online scaling
         0., # online learning rate
         1, # online scaling frequency
         true,
@@ -136,21 +136,17 @@ function parse_command_line()
         "--instance_name"
         help = "The name of the instance to solve in .mps.gz or .mps format."
         arg_type = String
-        default = "fit1d"
-        # required = true
-
+        default = "adlittle"
 
         "--dataset"
         help = "dataset name"
         arg_type = String
         default = "netlib"
-        # required = true
 
         "--experiment_name"
         help = "experiment name."
         arg_type = String
-        default = "hyperPDLP"
-        # required = true
+        default = "PDLP"
 
         "--tolerance"
         help = "KKT tolerance of the solution."
@@ -165,7 +161,7 @@ function parse_command_line()
         "--learning_rate"
         help = "Learning rate for online scaling."
         arg_type = Float64
-        default = 0.001
+        default = 0.0
 
         "--online_scaling_frequency"
         help = "Frequency of online scaling."
@@ -181,51 +177,18 @@ function parse_command_line()
     return ArgParse.parse_args(arg_parse)
 end
 
-function get_iteration_from_json(json_file)
-    if isfile(json_file)
-        json_string = read(json_file, String)
-        data = JSON.parse(json_string)
-        if !isa(data, Dict)
-            error("Expected a dictionary at the top level of the JSON file")
-        end
-        return data["iteration_count"]
-    end
-end
-
-function get_ada_iteration(dataset, instance_name, time_sec_limit, tolerance)
-    experiment_name = "adaPDLP_time_$(time_sec_limit)_tol_$(tolerance)_lr_0.0"
-    ada_directory = joinpath("output/solver_output", dataset, experiment_name, instance_name)
-    if !isdir(ada_directory)
-        ada_iter =  typemax(Int32)
-    else
-        ada_json_file = filter(x -> endswith(x, ".json"), readdir(ada_directory))
-        ada_json_file = joinpath(ada_directory, ada_json_file[1])
-        ada_iter = get_iteration_from_json(ada_json_file)
-    end
-
-    return ada_iter
-end
-
 function run_instance(instance_path, args)
-    dataset = args["dataset"]
-    experiment_name = args["experiment_name"]
-    tolerance = args["tolerance"]
-    time_sec_limit = args["time_sec_limit"]
-    learning_rate = args["learning_rate"]
+    dataset                  = args["dataset"]
+    experiment_name          = args["experiment_name"]
+    tolerance                = args["tolerance"]
+    time_sec_limit           = args["time_sec_limit"]
+    learning_rate            = args["learning_rate"]
     online_scaling_frequency = args["online_scaling_frequency"]
-    normalize = args["normalize"]
+    normalize                = args["normalize"]
 
-    if experiment_name == "adaPDLP"
-        online_scaling = true
+    if experiment_name == "PDLP"
         learning_rate = 0.0
-    elseif occursin("hyperPDLP", experiment_name)
-        online_scaling = true
-    else
-        error("Invalid experiment name")
-    end
-    
-    if occursin("non", experiment_name)
-        normalize = false
+        online_scaling_frequency = 1
     end
     
     experiment_name = "$(experiment_name)_time_$(time_sec_limit)_tol_$(tolerance)_lr_$(learning_rate)"
@@ -241,14 +204,11 @@ function run_instance(instance_path, args)
         end
     end
 
-    # lp = cuPDLP.qps_reader_to_standard_form(instance_path)
+    lp = cuPDLP.qps_reader_to_standard_form(instance_path)
 
-    # println("warm up start")
-    # oldstd = stdout
-    # redirect_stdout(devnull) # suppress output
-    # warm_up(lp); # solve the LP for 100 iterations
-    # redirect_stdout(oldstd)
-    # println("warm up end")
+    println("warm up start")
+    warm_up(lp);
+    println("warm up end")
 
     restart_params = cuPDLP.construct_restart_parameters(
         cuPDLP.ADAPTIVE_KKT,    # NO_RESTARTS FIXED_FREQUENCY ADAPTIVE_KKT
@@ -285,7 +245,7 @@ function run_instance(instance_path, args)
         termination_params,
         restart_params,
         step_size_policy_params,
-        online_scaling,
+        true, # online scaling
         learning_rate,
         online_scaling_frequency,
         normalize,
@@ -316,17 +276,16 @@ function main()
         all_instances = readdir(problem_folder)
         len = length(all_instances)
 
-        hard_instances = ["bnl1","bore3d","fffff800","greenbea","greenbeb","perold","pilot.ja","pilot4"]
+        hard_instances = ["bnl1","bore3d","fffff800","greenbea","greenbeb","perold","pilot.ja","pilot4"] # netlib
 
         for i in 1:len
             instance_path = joinpath(problem_folder, all_instances[i])
             try
                 instance_name = replace(basename(instance_path), r"\.(mps|MPS|qps|QPS)(\.gz)?$" => "")
-                # ada_iter = get_ada_iteration(dataset, instance_name, time_sec_limit, tolerance)
-                if instance_name in hard_instances
-                    println("Skip instance: ", i, instance_name)
-                    continue
-                end
+                # if instance_name in hard_instances
+                #     println("Skip instance: ", i, instance_name)
+                #     continue
+                # end
                 run_instance(instance_path, parsed_args)
             catch e
                 println("Error in instance: ", i, instance_path)
